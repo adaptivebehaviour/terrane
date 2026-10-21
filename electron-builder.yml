@@ -1,0 +1,37 @@
+# Packaging for the Electron application (npm run package builds an unpacked app; npm run dist builds the installer).
+# A project scaffolded from this shell changes appId and productName.
+appId: com.adaptivebehaviour.terrane
+productName: Terrane
+directories:
+  output: dist
+# Everything the app needs is bundled into out/ by electron-vite, so node_modules is left out of the package.
+files:
+  - out/**/*
+  - package.json
+  - "!**/node_modules/**"
+asar: true
+npmRebuild: false
+# Hardening applied to the Electron binary itself: no running as plain Node, no Node debugging switches or
+# NODE_OPTIONS, and the app is loaded only from its (integrity-checked) asar.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableCookieEncryption: true
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: false
+win:
+  target:
+    - nsis
+  # v1 builds are unsigned and for internal use (decision D5). Signing needs a certificate; when there is one, remove this line.
+  signAndEditExecutable: false
+nsis:
+  oneClick: false
+  # Per-user install: no administrator rights needed.
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  # Uninstalling never touches workspaces (they live in folders the user chose) nor the app's settings.
+  deleteAppDataOnUninstall: false
+# No auto-update feed in v1 (decision D5): without this, electron-builder tries to detect a publish provider and fails.
+publish: null

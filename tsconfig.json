@@ -1,0 +1,49 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "types": [
+      "node",
+      "vite/client"
+    ],
+    "paths": {
+      "@adaptivebehaviour/desktop/src/*": [
+        "./node_modules/@adaptivebehaviour/desktop/src/*"
+      ],
+      "@adaptivebehaviour/manifesto/src/*": [
+        "./node_modules/@adaptivebehaviour/manifesto/src/*"
+      ],
+      "@adaptivebehaviour/scenes/src/*": [
+        "./node_modules/@adaptivebehaviour/scenes/src/*"
+      ],
+      "@adaptivebehaviour/scenes-records/src/*": [
+        "./node_modules/@adaptivebehaviour/scenes-records/src/*"
+      ],
+      "@adaptivebehaviour/ui/src/*": [
+        "./node_modules/@adaptivebehaviour/ui/src/*"
+      ],
+      "terrane-collection/src/*": [
+        "./collection/src/*"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "electron.vite.config.ts",
+    "tests"
+  ]
+}

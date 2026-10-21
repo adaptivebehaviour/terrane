@@ -1,0 +1,43 @@
+{
+  "name": "terrane",
+  "version": "1.0.0",
+  "description": "terrane Electron desktop application",
+  "private": true,
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:e2e": "playwright test",
+    "package": "electron-vite build && electron-builder --dir",
+    "dist": "electron-vite build && electron-builder"
+  },
+  "dependencies": {
+    "@adaptivebehaviour/desktop": "file:vendor/adaptivebehaviour-desktop-2.1.0.tgz",
+    "@adaptivebehaviour/manifesto": "file:vendor/adaptivebehaviour-manifesto-2.1.0.tgz",
+    "@adaptivebehaviour/scenes": "file:vendor/adaptivebehaviour-scenes-2.1.0.tgz",
+    "@adaptivebehaviour/scenes-records": "file:vendor/adaptivebehaviour-scenes-records-2.1.0.tgz",
+    "@adaptivebehaviour/ui": "file:vendor/adaptivebehaviour-ui-2.1.0.tgz",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "terrane-collection": "*"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@tailwindcss/vite": "^4.3.2",
+    "@types/node": "^22.15.21",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "44.9.2",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^6.0.0",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.3.5"
+  },
+  "workspaces": [
+    "collection"
+  ]
+}

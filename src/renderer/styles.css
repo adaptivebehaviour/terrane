@@ -1,0 +1,6 @@
+@import "tailwindcss";
+@import "@adaptivebehaviour/manifesto/src/styles.css";
+@import "@adaptivebehaviour/scenes-records/src/styles.css";
+@import "@adaptivebehaviour/desktop/src/desktop/styles.css";
+@import "@adaptivebehaviour/ui/src/styles.css";
+@import "terrane-collection/src/styles.css";
