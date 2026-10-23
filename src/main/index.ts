@@ -6,6 +6,7 @@ import { delimiter, join, normalize, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { APP_ID, APP_NAME, externalLinkOrigins, services } from './config';
 import { createSidecar } from './sidecar';
+import { Workspace } from './workspace';
 
 const APP_ORIGIN = 'app://app';
 // In development the renderer is served by the Vite dev server; in a build it is served from the app:// protocol.
@@ -29,6 +30,17 @@ async function pickFolder(purpose: 'create' | 'open'): Promise<string | undefine
     title: purpose === 'create' ? 'Choose an empty folder for the new workspace' : 'Choose a workspace folder',
     properties: purpose === 'create' ? ['openDirectory', 'createDirectory'] : ['openDirectory'],
   };
+  const window = BrowserWindow.getFocusedWindow();
+  const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
+  return result.canceled ? undefined : result.filePaths[0];
+}
+
+/** Test-only: in a development run AB_E2E_PICK_FILE answers the file dialogs, one path per dialog. */
+const scriptedFiles: string[] = !app.isPackaged && process.env['AB_E2E_PICK_FILE'] ? process.env['AB_E2E_PICK_FILE'].split(delimiter) : [];
+
+async function pickFile(): Promise<string | undefined> {
+  if (scriptedFiles.length > 0) return scriptedFiles.shift();
+  const options: Electron.OpenDialogOptions = { title: 'Choose a file to add to the workspace', properties: ['openFile'] };
   const window = BrowserWindow.getFocusedWindow();
   const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
   return result.canceled ? undefined : result.filePaths[0];
@@ -125,6 +137,7 @@ if (!app.requestSingleInstanceLock()) {
       onHookError: (error) => log('[workspace] hook failed:', error instanceof Error ? error.message : error),
     });
     const net = new NetworkServices({ services, credentials: new EnvironmentCredentials(), log });
+    // The framework's own API (records, sessions, files, …) is registered but unused: no framework workspace is opened.
     const handlers = createHandlers({
       app: { name: APP_NAME, version: app.getVersion(), platform: process.platform },
       workspaces,
@@ -136,13 +149,34 @@ if (!app.requestSingleInstanceLock()) {
       onError: (channel, error) => log(`[ipc] ${channel} failed:`, error instanceof Error ? error.message : error),
     });
 
-    // The application has one workspace, opened automatically; the user is never asked to choose or create one.
-    // AB_E2E_WORKSPACE (development runs only) points tests at a throwaway folder.
-    const workspaceFolder = (!app.isPackaged && process.env['AB_E2E_WORKSPACE']) || join(app.getPath('userData'), 'workspace');
+    // The workspace is a folder the user picks; the last one is reopened at startup. With none open, the renderer
+    // asks the user to select a folder.
+    const workspace = new Workspace({
+      settingsFile: join(app.getPath('userData'), 'last-workspace.json'),
+      appId: APP_ID,
+      createdBy: `${APP_ID} ${app.getVersion()}`,
+      pickFolder: () => pickFolder('open'),
+      pickFile,
+      onOpened: (root) => sidecar?.start(root),
+      onClosed: () => sidecar?.stop(),
+      onHookError: (error) => log('[workspace] hook failed:', error instanceof Error ? error.message : error),
+    });
+    const trusted = (event: Electron.IpcMainInvokeEvent) => {
+      if (!isAppUrl(event.senderFrame?.url ?? '')) throw new Error('Untrusted sender');
+    };
+    ipcMain.handle('terrane:workspace.current', (event) => (trusted(event), workspace.state()));
+    ipcMain.handle('terrane:workspace.open', (event) => (trusted(event), workspace.open()));
+    ipcMain.handle('terrane:workspace.readNode', (event, id: unknown) => (trusted(event), typeof id === 'string' ? workspace.readNode(id) : Promise.reject(new Error('Invalid node id'))));
+    ipcMain.handle('terrane:workspace.createText', (event, name: unknown, text: unknown) => {
+      trusted(event);
+      if (typeof name !== 'string' || typeof text !== 'string') throw new Error('Invalid text file');
+      return workspace.createText(name, text);
+    });
+    ipcMain.handle('terrane:workspace.addFile', (event) => (trusted(event), workspace.addFile()));
     try {
-      await workspaces.openDefault(workspaceFolder);
+      await workspace.reopenLast();
     } catch (error) {
-      log('[workspace] could not open the default workspace:', error instanceof Error ? error.message : error);
+      log('[workspace] could not reopen the last workspace:', error instanceof Error ? error.message : error);
     }
 
     hardenSession();
@@ -163,7 +197,7 @@ if (!app.requestSingleInstanceLock()) {
       if (closing) return;
       event.preventDefault();
       closing = true;
-      void Promise.allSettled([workspaces.close(), sidecar?.stop()]).finally(() => app.quit());
+      void Promise.allSettled([workspace.close(), sidecar?.stop()]).finally(() => app.quit());
     });
   });
 
