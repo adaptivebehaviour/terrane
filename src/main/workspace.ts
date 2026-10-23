@@ -1,4 +1,4 @@
-import { acquireLock, FORMAT_VERSION, type WorkspaceLock } from '@adaptivebehaviour/desktop/src/workspace/index';
+import { acquireLock, FORMAT_VERSION, type WorkspaceLock } from './lock';
 import { randomUUID } from 'node:crypto';
 import { access, constants, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';

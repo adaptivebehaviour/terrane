@@ -1,4 +1,4 @@
-import { createHandlers, SettingsStore, WorkspaceManager } from '@adaptivebehaviour/desktop/src/main/index';
+import { createHandlers } from '@adaptivebehaviour/desktop/src/main/index';
 import { registerHandlers, type IpcEventLike } from '@adaptivebehaviour/desktop/src/ipc/index';
 import { buildCsp, EnvironmentCredentials, NetworkServices } from '@adaptivebehaviour/desktop/src/net/index';
 import { app, BrowserWindow, dialog, ipcMain, net as electronNet, protocol, session, shell } from 'electron';
@@ -127,20 +127,10 @@ if (!app.requestSingleInstanceLock()) {
       resourcesPath: process.resourcesPath,
       allowedEnv: services.flatMap((service) => (service.credential ? [service.credential.env] : [])),
     });
-    const workspaces = new WorkspaceManager({
-      appId: APP_ID,
-      createdBy: `${APP_ID} ${app.getVersion()}`,
-      settings: new SettingsStore(app.getPath('userData')),
-      pickFolder,
-      onOpened: ({ root, readOnly }) => (readOnly ? undefined : sidecar?.start(root)),
-      onClosed: () => sidecar?.stop(),
-      onHookError: (error) => log('[workspace] hook failed:', error instanceof Error ? error.message : error),
-    });
     const net = new NetworkServices({ services, credentials: new EnvironmentCredentials(), log });
     // The framework's own API (records, sessions, files, …) is registered but unused: no framework workspace is opened.
     const handlers = createHandlers({
       app: { name: APP_NAME, version: app.getVersion(), platform: process.platform },
-      workspaces,
       net,
       sidecar,
     });
@@ -157,7 +147,7 @@ if (!app.requestSingleInstanceLock()) {
       createdBy: `${APP_ID} ${app.getVersion()}`,
       pickFolder: () => pickFolder('open'),
       pickFile,
-      onOpened: (root) => sidecar?.start(root),
+      onOpened: () => sidecar?.start(),
       onClosed: () => sidecar?.stop(),
       onHookError: (error) => log('[workspace] hook failed:', error instanceof Error ? error.message : error),
     });
