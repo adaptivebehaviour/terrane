@@ -308,8 +308,8 @@ test.describe('electron shell: security', () => {
         protocol: location.protocol,
       }));
       expect(exposed).toMatchObject({ require: 'undefined', process: 'undefined', buffer: 'undefined', electron: 'undefined', isolated: true, protocol: 'app:' });
-      expect(exposed.workspaceBridge).toEqual(['addFile', 'createText', 'current', 'open', 'readNode']);
-      expect(exposed.groups).toEqual(['app', 'credentials', 'events', 'files', 'net', 'records', 'sessions', 'sidecar', 'workspace']);
+      expect(exposed.workspaceBridge).toEqual(['addFile', 'createInformation', 'createLink', 'createText', 'current', 'open', 'readNode', 'setLinkWeight']);
+      expect(exposed.groups).toEqual(['app', 'credentials', 'net', 'sidecar']);
       await app.close();
     });
   });
@@ -354,8 +354,8 @@ test.describe('electron shell: security', () => {
       const results = await page.evaluate(async () => {
         const bridge = (window as unknown as { abBridge: Record<string, Record<string, (input?: unknown) => Promise<{ ok: boolean; error?: { code: string } }>>> }).abBridge;
         return {
-          badShape: (await bridge.records.get({ collection: 5, id: 'a' })).error?.code,
-          unknownMethod: typeof (bridge.records as Record<string, unknown>).drop,
+          badShape: (await bridge.credentials.status({ service: 5 })).error?.code,
+          unknownMethod: typeof (bridge.credentials as Record<string, unknown>).drop,
           unknownGroup: typeof (bridge as Record<string, unknown>).fs,
           noGenericInvoke: typeof (bridge as Record<string, unknown>).invoke,
         };

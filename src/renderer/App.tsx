@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AddDialog } from './AddDialog';
-import { handlerFor } from './handlers';
+import { Canvas } from './Canvas';
 import folderOpenIcon from './icons/folder-open.svg';
 import plusIcon from './icons/plus.svg';
 
 /**
- * A toolbar (open workspace, plus) above the content area. The workspace is the folder the user selects: the main
+ * A toolbar (open workspace, plus) above the canvas, which shows the network. The workspace is the folder the user selects: the main
  * process reopens the last one at startup, and when none is open the folder dialog is shown until one is chosen.
  */
 export function App() {
@@ -22,17 +22,40 @@ export function App() {
     return result.status;
   }, []);
 
-  const add = async (action: () => Promise<WorkspaceResult>) => {
-    setAdding(false);
+  /** Runs a change to the network and shows the workspace it leaves (or the error). */
+  const change = async (action: () => Promise<WorkspaceResult>) => {
     setError(undefined);
     const result = await action();
     setWorkspace(result.workspace);
     if (result.status === 'failed') setError(result.message);
   };
 
+  const add = async (action: () => Promise<WorkspaceResult>) => {
+    setAdding(false);
+    await change(action);
+  };
+
   useEffect(() => {
     void window.workspaceBridge.current().then(setWorkspace);
   }, []);
+
+  // Hotkeys for the toolbar buttons: Ctrl+O opens a workspace, Ctrl+N adds. Like the buttons, they do nothing while a
+  // dialog is open. (Electron's default menu, which Terrane keeps, uses neither.)
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || event.shiftKey || event.altKey || event.metaKey || document.querySelector('dialog[open]')) return;
+      const key = event.key.toLowerCase();
+      if (key === 'o') {
+        event.preventDefault();
+        void openWorkspace();
+      } else if (key === 'n') {
+        event.preventDefault();
+        setAdding(true);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [openWorkspace]);
 
   // With no workspace open, keep asking for a folder until one is opened. An error (shown below) ends the loop;
   // the folder button remains available.
@@ -45,7 +68,7 @@ export function App() {
   }, [workspace, openWorkspace]);
 
   return (
-    <>
+    <div className="flex h-screen flex-col">
       <nav className="flex items-center gap-1 border-b border-slate-200 p-1" data-testid="toolbar">
         <ToolbarButton label="Open workspace" icon={folderOpenIcon} testId="open-workspace" onClick={() => void openWorkspace()} />
         <ToolbarButton label="Add" icon={plusIcon} testId="add" onClick={() => setAdding(true)} />
@@ -54,19 +77,20 @@ export function App() {
         <AddDialog
           onSelectFile={() => void add(() => window.workspaceBridge.addFile())}
           onCreateText={(name, text) => void add(() => window.workspaceBridge.createText(name, text))}
+          onCreateInformation={(text) => void add(() => window.workspaceBridge.createInformation(text))}
           onCancel={() => setAdding(false)}
         />
       )}
       {error && <p role="alert" data-testid="error" className="m-4 rounded bg-red-50 p-3 text-red-800">{error}</p>}
       {workspace?.open && (
-        <main className="flex flex-wrap content-start gap-4 p-4" data-testid="workspace">
-          {workspace.nodes.map((node) => {
-            const { Component } = handlerFor(node.filename);
-            return <Component key={node.id} node={node} />;
-          })}
-        </main>
+        <Canvas
+          nodes={workspace.nodes}
+          links={workspace.links}
+          onCreateLink={(source, target) => void change(() => window.workspaceBridge.createLink(source, target))}
+          onSetWeight={(link, weight) => void change(() => window.workspaceBridge.setLinkWeight(link, weight))}
+        />
       )}
-    </>
+    </div>
   );
 }
 

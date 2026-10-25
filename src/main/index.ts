@@ -162,6 +162,21 @@ if (!app.requestSingleInstanceLock()) {
       if (typeof name !== 'string' || typeof text !== 'string') throw new Error('Invalid text file');
       return workspace.createText(name, text);
     });
+    ipcMain.handle('terrane:workspace.createInformation', (event, text: unknown) => {
+      trusted(event);
+      if (typeof text !== 'string') throw new Error('Invalid information node');
+      return workspace.createInformation(text);
+    });
+    ipcMain.handle('terrane:workspace.createLink', (event, source: unknown, target: unknown) => {
+      trusted(event);
+      if (typeof source !== 'string' || typeof target !== 'string') throw new Error('Invalid link');
+      return workspace.createLink(source, target);
+    });
+    ipcMain.handle('terrane:workspace.setLinkWeight', (event, id: unknown, weight: unknown) => {
+      trusted(event);
+      if (typeof id !== 'string' || typeof weight !== 'number') throw new Error('Invalid link weight');
+      return workspace.setLinkWeight(id, weight);
+    });
     ipcMain.handle('terrane:workspace.addFile', (event) => (trusted(event), workspace.addFile()));
     try {
       await workspace.reopenLast();

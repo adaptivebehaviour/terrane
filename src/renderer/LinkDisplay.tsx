@@ -1,0 +1,26 @@
+import { LINE_WIDTH } from './paths';
+
+/** What a selected link looks like (D15). */
+const SELECTED_GLOW = 'drop-shadow(0 0 2px #2563eb)';
+
+interface LinkDisplayProps {
+  id: string;
+  /** SVG path data, from paths.ts. */
+  d: string;
+  selected: boolean;
+  onSelect: () => void;
+  onEdit: () => void;
+}
+
+/**
+ * A link's display (PRD 8.3): a black line, LINE_WIDTH thick, with no arrowheads. A wider, invisible copy of the line
+ * underneath takes the clicks (select) and double-clicks (edit the weight), since the line itself is hard to hit.
+ */
+export function LinkDisplay({ id, d, selected, onSelect, onEdit }: LinkDisplayProps) {
+  return (
+    <g data-testid="link" data-link-id={id} data-selected={selected}>
+      <path d={d} fill="none" stroke="transparent" strokeWidth={12} pointerEvents="stroke" className="cursor-pointer" onClick={onSelect} onDoubleClick={onEdit} />
+      <path data-testid="link-line" d={d} fill="none" stroke="black" strokeWidth={LINE_WIDTH} vectorEffect="non-scaling-stroke" pointerEvents="none" style={selected ? { filter: SELECTED_GLOW } : undefined} />
+    </g>
+  );
+}

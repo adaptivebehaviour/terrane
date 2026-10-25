@@ -13,11 +13,38 @@ export interface WorkspaceNode {
   addedAt: string;
 }
 
+/** An entry of the `nodes` array in `workspace.json` that is not a file: it stores a single string, in `items`. */
+export interface InformationNode {
+  id: string;
+  addedAt: string;
+  /** Holds the node's one string. */
+  items: string[];
+}
+
+/** Either kind of entry in `nodes`. */
+export type NodeRecord = WorkspaceNode | InformationNode;
+
+export function isInformationNode(node: NodeRecord): node is InformationNode {
+  return 'items' in node;
+}
+
+/** An entry of the `links` array in `workspace.json`: a connection from a source node to a target node. */
+export interface WorkspaceLink {
+  id: string;
+  /** The `id` of the source node. */
+  source: string;
+  /** The `id` of the target node. */
+  target: string;
+  /** 1 to 10. */
+  weight: number;
+}
+
 export interface WorkspaceState {
   open: boolean;
   /** The folder's name; the renderer never sees the path. */
   name?: string;
-  nodes: WorkspaceNode[];
+  nodes: NodeRecord[];
+  links: WorkspaceLink[];
 }
 
 export interface OpenResult {
@@ -41,6 +68,8 @@ export interface WorkspaceOptions {
 }
 
 const WORKSPACE_FILE = 'workspace.json';
+/** The weight of a new link. */
+const NEW_LINK_WEIGHT = 5;
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -57,13 +86,14 @@ async function exists(path: string): Promise<boolean> {
  */
 export class Workspace {
   private root: string | undefined;
-  private nodes: WorkspaceNode[] = [];
+  private nodes: NodeRecord[] = [];
+  private links: WorkspaceLink[] = [];
   private lock: WorkspaceLock | undefined;
 
   constructor(private readonly options: WorkspaceOptions) {}
 
   state(): WorkspaceState {
-    return this.root ? { open: true, name: basename(this.root), nodes: this.nodes } : { open: false, nodes: [] };
+    return this.root ? { open: true, name: basename(this.root), nodes: this.nodes, links: this.links } : { open: false, nodes: [], links: [] };
   }
 
   /** Reopens the last workspace, if it is still a workspace folder. */
@@ -121,6 +151,53 @@ export class Workspace {
     }
   }
 
+  /** Records an information node holding `text` in the `nodes` of `workspace.json`; no file is created. An empty string is refused. */
+  async createInformation(text: string): Promise<OpenResult> {
+    try {
+      const root = this.root;
+      if (!root) throw new Error('No workspace is open');
+      if (text === '') throw new Error('An information node cannot be empty');
+      const node: InformationNode = { id: randomUUID(), addedAt: new Date().toISOString(), items: [text] };
+      const nodes = [...this.nodes, node];
+      await this.writeNodes(root, nodes);
+      this.nodes = nodes;
+      return { status: 'opened', workspace: this.state() };
+    } catch (error) {
+      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
+    }
+  }
+
+  /** Records a link from the node `source` to the node `target`, with the weight of a new link, in the `links` of `workspace.json`. */
+  async createLink(source: string, target: string): Promise<OpenResult> {
+    try {
+      const root = this.root;
+      if (!root) throw new Error('No workspace is open');
+      if (source === target || ![source, target].every((id) => this.nodes.some((node) => node.id === id))) throw new Error('Not a valid link');
+      const links = [...this.links, { id: randomUUID(), source, target, weight: NEW_LINK_WEIGHT }];
+      await this.writeLinks(root, links);
+      this.links = links;
+      return { status: 'opened', workspace: this.state() };
+    } catch (error) {
+      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
+    }
+  }
+
+  /** Sets the weight (a whole number from 1 to 10) of the link `id` in `workspace.json`. */
+  async setLinkWeight(id: string, weight: number): Promise<OpenResult> {
+    try {
+      const root = this.root;
+      if (!root) throw new Error('No workspace is open');
+      if (!Number.isInteger(weight) || weight < 1 || weight > 10) throw new Error(`Not a valid weight: ${weight}`);
+      if (!this.links.some((link) => link.id === id)) throw new Error('No such link in the workspace');
+      const links = this.links.map((link) => (link.id === id ? { ...link, weight } : link));
+      await this.writeLinks(root, links);
+      this.links = links;
+      return { status: 'opened', workspace: this.state() };
+    } catch (error) {
+      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
+    }
+  }
+
   /** Adds the file `filename`, already in the workspace folder, to `nodes`; if that fails the file is removed again. */
   private async recordNode(root: string, filename: string): Promise<void> {
     const target = join(root, filename);
@@ -135,10 +212,10 @@ export class Workspace {
     }
   }
 
-  /** The contents of the file behind one node, base64-encoded. Only files that are nodes of the open workspace can be read. */
+  /** The contents of the file behind one node, base64-encoded. Only files that are nodes of the open workspace can be read; information nodes have no file. */
   async readNode(id: string): Promise<string> {
     const node = this.nodes.find((candidate) => candidate.id === id);
-    if (!this.root || !node || basename(node.filename) !== node.filename) throw new Error('No such file in the workspace');
+    if (!this.root || !node || isInformationNode(node) || basename(node.filename) !== node.filename) throw new Error('No such file in the workspace');
     return (await readFile(join(this.root, node.filename))).toString('base64');
   }
 
@@ -147,6 +224,7 @@ export class Workspace {
     this.lock = undefined;
     this.root = undefined;
     this.nodes = [];
+    this.links = [];
     if (!lock) return;
     await lock.release();
     await this.runHook(() => this.options.onClosed?.());
@@ -157,9 +235,11 @@ export class Workspace {
     await this.ensureWorkspaceFile(folder);
     // Take the new lock before letting go of the current workspace, so a failed switch leaves it open.
     const lock = await acquireLock(folder);
-    let nodes: WorkspaceNode[];
+    let nodes: NodeRecord[];
+    let links: WorkspaceLink[];
     try {
       nodes = await this.loadNodes(folder);
+      links = await this.loadLinks(folder);
     } catch (error) {
       await lock.release();
       throw error;
@@ -168,6 +248,7 @@ export class Workspace {
     this.root = folder;
     this.lock = lock;
     this.nodes = nodes;
+    this.links = links;
     await writeFile(this.options.settingsFile, JSON.stringify({ path: folder }, null, 2) + '\n');
     await this.runHook(() => this.options.onOpened?.(folder));
   }
@@ -176,17 +257,23 @@ export class Workspace {
   private async ensureWorkspaceFile(folder: string): Promise<void> {
     const file = join(folder, WORKSPACE_FILE);
     if (await exists(file)) return;
-    const info = { formatVersion: FORMAT_VERSION, workspaceId: randomUUID(), appId: this.options.appId, createdAt: new Date().toISOString(), createdBy: this.options.createdBy, nodes: [] };
+    const info = { formatVersion: FORMAT_VERSION, workspaceId: randomUUID(), appId: this.options.appId, createdAt: new Date().toISOString(), createdBy: this.options.createdBy, nodes: [], links: [] };
     await mkdir(folder, { recursive: true });
     await writeFile(file, JSON.stringify(info, null, 2) + '\n', { flag: 'wx' });
   }
 
   /** Reads the `nodes` of `workspace.json`, adding an empty `nodes` array to a file that has none. */
-  private async loadNodes(folder: string): Promise<WorkspaceNode[]> {
+  private async loadNodes(folder: string): Promise<NodeRecord[]> {
     const info = await this.readInfo(folder);
-    if (Array.isArray(info.nodes)) return info.nodes as WorkspaceNode[];
+    if (Array.isArray(info.nodes)) return info.nodes as NodeRecord[];
     await this.writeNodes(folder, []);
     return [];
+  }
+
+  /** Reads the `links` of `workspace.json`; a file without them has no links (they are written with the first link). */
+  private async loadLinks(folder: string): Promise<WorkspaceLink[]> {
+    const info = await this.readInfo(folder);
+    return Array.isArray(info.links) ? (info.links as WorkspaceLink[]) : [];
   }
 
   private async readInfo(folder: string): Promise<Record<string, unknown>> {
@@ -200,9 +287,19 @@ export class Workspace {
     return info as Record<string, unknown>;
   }
 
-  /** Replaces `nodes` in `workspace.json`, leaving its other entries as they are. The file is swapped in whole. */
-  private async writeNodes(folder: string, nodes: WorkspaceNode[]): Promise<void> {
-    const info = { ...(await this.readInfo(folder)), nodes };
+  /** Replaces `nodes` in `workspace.json`, leaving its other entries as they are. */
+  private async writeNodes(folder: string, nodes: NodeRecord[]): Promise<void> {
+    await this.writeEntries(folder, { nodes });
+  }
+
+  /** Replaces `links` in `workspace.json`, leaving its other entries as they are. */
+  private async writeLinks(folder: string, links: WorkspaceLink[]): Promise<void> {
+    await this.writeEntries(folder, { links });
+  }
+
+  /** Replaces the given entries of `workspace.json`, leaving its others as they are. The file is swapped in whole. */
+  private async writeEntries(folder: string, entries: { nodes?: NodeRecord[]; links?: WorkspaceLink[] }): Promise<void> {
+    const info = { ...(await this.readInfo(folder)), ...entries };
     const file = join(folder, WORKSPACE_FILE);
     const temp = `${file}.${process.pid}.tmp`;
     await writeFile(temp, JSON.stringify(info, null, 2) + '\n');

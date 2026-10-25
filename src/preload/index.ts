@@ -13,4 +13,7 @@ contextBridge.exposeInMainWorld('workspaceBridge', {
   readNode: (id: string) => ipcRenderer.invoke('terrane:workspace.readNode', id),
   createText: (name: string, text: string) => ipcRenderer.invoke('terrane:workspace.createText', name, text),
   addFile: () => ipcRenderer.invoke('terrane:workspace.addFile'),
+  createInformation: (text: string) => ipcRenderer.invoke('terrane:workspace.createInformation', text),
+  createLink: (source: string, target: string) => ipcRenderer.invoke('terrane:workspace.createLink', source, target),
+  setLinkWeight: (id: string, weight: number) => ipcRenderer.invoke('terrane:workspace.setLinkWeight', id, weight),
 });

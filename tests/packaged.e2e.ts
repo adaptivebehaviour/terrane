@@ -61,7 +61,7 @@ test.describe('packaged app', () => {
       }));
       expect(facts.csp).toContain("connect-src 'self'");
       expect(facts.nodeGlobals).toEqual(['undefined', 'undefined']);
-      expect(facts.groups).toContain('workspace');
+      expect(facts.groups).toEqual(['app', 'credentials', 'net', 'sidecar']);
       expect(facts.info).toMatchObject({ ok: true, value: { name: 'Terrane' } });
       await browser!.close();
     } finally {
