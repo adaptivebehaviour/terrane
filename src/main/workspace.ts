@@ -62,6 +62,8 @@ export interface WorkspaceOptions {
   pickFolder: () => Promise<string | undefined>;
   /** Shows the file dialog (a single file); resolves with `undefined` if the user cancels. */
   pickFile: () => Promise<string | undefined>;
+  /** Opens a file with the application the system associates with its type; resolves with an error message, or an empty string if it worked. */
+  openPath: (path: string) => Promise<string>;
   onOpened?: (root: string) => void | Promise<void>;
   onClosed?: () => void | Promise<void>;
   onHookError?: (error: unknown) => void;
@@ -70,6 +72,8 @@ export interface WorkspaceOptions {
 const WORKSPACE_FILE = 'workspace.json';
 /** The weight of a new link. */
 const NEW_LINK_WEIGHT = 5;
+/** The weight of the link from a note created by right-clicking a node to that node. */
+const ATTACHED_NOTE_WEIGHT = 10;
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -167,6 +171,41 @@ export class Workspace {
     }
   }
 
+  /** Records an information node holding `text`, and a link from it to the node `target` with the weight of an attached note, in `workspace.json`. An empty string is refused. */
+  async createInformationLinked(text: string, target: string): Promise<OpenResult> {
+    try {
+      const root = this.root;
+      if (!root) throw new Error('No workspace is open');
+      if (text === '') throw new Error('An information node cannot be empty');
+      if (!this.nodes.some((node) => node.id === target)) throw new Error('Not a valid link');
+      const node: InformationNode = { id: randomUUID(), addedAt: new Date().toISOString(), items: [text] };
+      const nodes = [...this.nodes, node];
+      const links = [...this.links, { id: randomUUID(), source: node.id, target, weight: ATTACHED_NOTE_WEIGHT }];
+      await this.writeEntries(root, { nodes, links });
+      this.nodes = nodes;
+      this.links = links;
+      return { status: 'opened', workspace: this.state() };
+    } catch (error) {
+      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
+    }
+  }
+
+  /** Replaces the string of the information node `id` with `text` in the `nodes` of `workspace.json`. An empty string is refused. */
+  async updateInformation(id: string, text: string): Promise<OpenResult> {
+    try {
+      const root = this.root;
+      if (!root) throw new Error('No workspace is open');
+      if (text === '') throw new Error('An information node cannot be empty');
+      if (!this.nodes.some((node) => node.id === id && isInformationNode(node))) throw new Error('No such information node in the workspace');
+      const nodes = this.nodes.map((node) => (node.id === id ? { ...node, items: [text] } : node));
+      await this.writeNodes(root, nodes);
+      this.nodes = nodes;
+      return { status: 'opened', workspace: this.state() };
+    } catch (error) {
+      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
+    }
+  }
+
   /** Records a link from the node `source` to the node `target`, with the weight of a new link, in the `links` of `workspace.json`. */
   async createLink(source: string, target: string): Promise<OpenResult> {
     try {
@@ -217,6 +256,19 @@ export class Workspace {
     const node = this.nodes.find((candidate) => candidate.id === id);
     if (!this.root || !node || isInformationNode(node) || basename(node.filename) !== node.filename) throw new Error('No such file in the workspace');
     return (await readFile(join(this.root, node.filename))).toString('base64');
+  }
+
+  /** Opens the file behind one node with the application the system associates with its type. Only files that are nodes of the open workspace can be opened. */
+  async openNode(id: string): Promise<OpenResult> {
+    try {
+      const node = this.nodes.find((candidate) => candidate.id === id);
+      if (!this.root || !node || isInformationNode(node) || basename(node.filename) !== node.filename) throw new Error('No such file in the workspace');
+      const message = await this.options.openPath(join(this.root, node.filename));
+      if (message) throw new Error(message);
+      return { status: 'opened', workspace: this.state() };
+    } catch (error) {
+      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
+    }
   }
 
   async close(): Promise<void> {

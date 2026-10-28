@@ -51,10 +51,16 @@ declare global {
       createText: (name: string, text: string) => Promise<WorkspaceResult>;
       /** Records an information node holding the given (non-empty) string in `workspace.json`. */
       createInformation: (text: string) => Promise<WorkspaceResult>;
+      /** Records an information node holding the given (non-empty) string, linked to the given node with a weight of 10, in `workspace.json`. */
+      createInformationLinked: (text: string, target: string) => Promise<WorkspaceResult>;
+      /** Replaces the string of an existing information node with the given (non-empty) string in `workspace.json`. */
+      updateInformation: (id: string, text: string) => Promise<WorkspaceResult>;
       /** Records a link (with the weight of a new link) from one node to another in `workspace.json`. */
       createLink: (source: string, target: string) => Promise<WorkspaceResult>;
       /** Sets a link's weight (1 to 10) in `workspace.json`. */
       setLinkWeight: (id: string, weight: number) => Promise<WorkspaceResult>;
+      /** Opens the file behind a node with the application the system associates with its type. */
+      openNode: (id: string) => Promise<WorkspaceResult>;
       /** The contents of the file behind a node, base64-encoded. */
       readNode: (id: string) => Promise<string>;
     };

@@ -79,6 +79,33 @@ const PLACES: Record<Anchor, [number, number]> = {
   left: [-1, 0],
   'top-left': [-1, -1],
 };
+/** How much worse (in distance units) a diagonal axis is than a horizontal or vertical one: displays sit on a diagonal axis only when they cannot sit on one of those. */
+export const DIAGONAL_PENALTY = 8;
+
+/**
+ * How far the line from one display's centre to another's, which runs (dx, dy), is from the nearest ideal axis (horizontal,
+ * vertical or diagonal): the distance the second centre lies from that axis through the first, plus DIAGONAL_PENALTY for a diagonal axis.
+ * Zero means the two displays are centred on a horizontal or vertical axis.
+ */
+export function alignmentCost(dx: number, dy: number): number {
+  const [ax, ay] = [Math.abs(dx), Math.abs(dy)];
+  return Math.min(ax, ay, Math.abs(ax - ay) / Math.SQRT2 + DIAGONAL_PENALTY);
+}
+
+/**
+ * The anchors a link between two displays ideally joins them by, given the line (dx, dy) from the source's centre to the
+ * target's: on the axis nearest that line (see alignmentCost), the source's anchor facing along it and the target's facing back.
+ * Undefined if the centres coincide.
+ */
+export function idealAnchors(dx: number, dy: number): [Anchor, Anchor] | undefined {
+  if (dx === 0 && dy === 0) return undefined;
+  const [ax, ay] = [Math.abs(dx), Math.abs(dy)];
+  const diagonal = Math.abs(ax - ay) / Math.SQRT2 + DIAGONAL_PENALTY;
+  const [across, down] = diagonal < Math.min(ax, ay) ? [Math.sign(dx), Math.sign(dy)] : ay <= ax ? [Math.sign(dx), 0] : [0, Math.sign(dy)];
+  const anchorAt = (x: number, y: number) => ANCHORS.find((anchor) => PLACES[anchor][0] === x && PLACES[anchor][1] === y)!;
+  return [anchorAt(across, down), anchorAt(-across, -down)];
+}
+
 /** Near an end two links share (they join a display at the same anchor), meeting does not count as crossing. */
 const SHARED_END = 8;
 
@@ -364,7 +391,11 @@ class Options {
       }),
     ).sort((a, b) => a.length - b.length);
     this.routed = false;
-    this.best = this.curves.find((curve) => this.get(...curve.anchors));
+    // A clear single curve between the anchors the displays' relative position calls for wins over a shorter one elsewhere.
+    const centre = (r: Rect) => ({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+    const [from, to] = [centre(rects[source]), centre(rects[target])];
+    const ideal = idealAnchors(to.x - from.x, to.y - from.y);
+    this.best = (ideal && this.get(...ideal)) || this.curves.find((curve) => this.get(...curve.anchors));
     if (!this.best) {
       this.routed = true;
       // No single curve is clear: route around the displays. A path is never shorter than the distance between its

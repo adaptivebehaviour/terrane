@@ -1,4 +1,4 @@
-import { countCrossings, routeLinks, segmentsCross, type LinkPath, type Point, type Rect } from './paths';
+import { alignmentCost, countCrossings, DIAGONAL_PENALTY, routeLinks, segmentsCross, type LinkPath, type Point, type Rect } from './paths';
 
 /**
  * The layout (PRD 9): positions the node displays, in distance units, to meet its goals:
@@ -19,6 +19,11 @@ import { countCrossings, routeLinks, segmentsCross, type LinkPath, type Point, t
  * display at the end of a crossing link to other positions around the displays it is linked to, runs the simulation
  * from there, and keeps the move if it has fewer crossings and comes at least as close to the goals (so a layout that
  * met them still meets them).
+ *
+ * Last, the layout biases the positions towards an ideal (see align): nodes joined by a link line up with each other, centred on
+ * a horizontal or vertical axis, or failing that a diagonal one. The bias gives way to everything above: it only moves a
+ * display where the goals are still met and no more links cross. (Paths support it: a link between displays that sit on
+ * an axis joins the facing anchors, see idealAnchors in paths.ts.)
  *
  * Positions are not saved (D3): each run starts from the positions it is given (those of the previous run) and places
  * displays without one.
@@ -68,6 +73,14 @@ const UNTANGLE_ITERATIONS = 100;
 const UNTANGLE_PATHS = 600;
 /** How many positions, evenly spaced around its linked displays, a display is moved to when cutting down crossings. */
 const UNTANGLE_ANGLES = 12;
+/** The most passes over the displays the alignment bias makes, and (as for untangling) the most paths worked out in all. */
+const ALIGN_PASSES = 20;
+/** The simulation `settle` runs: its iterations, how often it checks, its pull towards alignment and the most a display moves in a step (times the scale). */
+const ALIGN_ITERATIONS = 300;
+const ALIGN_CHECK = 10;
+const ALIGN_BIAS = 0.1;
+const ALIGN_STEP = 3;
+const ALIGN_PATHS = 300;
 
 /** The range of link distances for a weight at a scale (9.3): continuous, highest weight shortest, all as wide. */
 export function distanceRange(weight: number, scale: number): [number, number] {
@@ -156,13 +169,80 @@ function routes(network: Network, positions: Point[]): LinkPath[] {
   return [...routeLinks(rects, network.links.map(({ link, a, b }) => ({ id: link.id, source: a, target: b }))).values()];
 }
 
-/** One run of the simulation at a fixed scale, from the given positions, until the goals are met or it has cooled. */
-function simulate(network: Network, start: Point[], scale: number, maxIterations = MAX_ITERATIONS): Trial {
+/**
+ * One step of the simulation: moves the displays by the forces on them, no more than `temperature` each, then moves apart any
+ * that are closer than the minimum space. With a `bias`, each link also pulls its two displays towards lining up (see
+ * alignmentCost), by that fraction of their misalignment.
+ */
+function advance(network: Network, positions: Point[], scale: number, temperature: number, bias = 0): void {
   const { nodes, links } = network;
   const n = nodes.length;
-  const positions = start.map((p) => ({ ...p }));
   const minSpace = MIN_SPACE * scale;
   const room = ROOM * scale;
+  const moves = positions.map(() => ({ x: 0, y: 0 }));
+  const push = (i: number, j: number, amount: number) => {
+    // Moves i and j apart (or, for a negative amount, together) by `amount` in all, along the line between them.
+    let dx = positions[j].x - positions[i].x;
+    let dy = positions[j].y - positions[i].y;
+    let length = Math.hypot(dx, dy);
+    if (length < 1e-6) {
+      dx = Math.cos(i + j);
+      dy = Math.sin(i + j);
+      length = 1;
+    }
+    moves[i].x -= (dx / length) * amount * 0.5;
+    moves[i].y -= (dy / length) * amount * 0.5;
+    moves[j].x += (dx / length) * amount * 0.5;
+    moves[j].y += (dy / length) * amount * 0.5;
+  };
+
+  // Links pull or push their displays towards the middle of their range.
+  for (const { link, a, b } of links) {
+    const [lo, hi] = distanceRange(link.weight, scale);
+    const margin = (hi - lo) / 4;
+    const d = linkDistance(nodes[a], positions[a], nodes[b], positions[b]);
+    if (d < lo + margin) push(a, b, (lo + margin - d) * 0.8);
+    else if (d > hi - margin) push(a, b, -(d - (hi - margin)) * 0.8);
+  }
+  // Close displays push each other away.
+  for (let i = 0; i < n; i += 1) {
+    for (let j = i + 1; j < n; j += 1) {
+      const s = space(nodes[i], positions[i], nodes[j], positions[j]);
+      if (s < room) push(i, j, (room - s) * 0.2);
+    }
+  }
+  // Each link pulls its displays across towards the nearest ideal axis between them.
+  if (bias > 0) {
+    for (const { a, b } of links) {
+      const [dx, dy] = [positions[b].x - positions[a].x, positions[b].y - positions[a].y];
+      const [ax, ay] = [Math.abs(dx), Math.abs(dy)];
+      const diagonal = Math.abs(ax - ay) / Math.SQRT2 + DIAGONAL_PENALTY;
+      const [px, py] =
+        diagonal < Math.min(ax, ay) ? [(Math.sign(dx) * (ax - ay)) / 2, (Math.sign(dy) * (ay - ax)) / 2] : ay <= ax ? [0, dy] : [dx, 0];
+      moves[a].x += px * bias * 0.5;
+      moves[a].y += py * bias * 0.5;
+      moves[b].x -= px * bias * 0.5;
+      moves[b].y -= py * bias * 0.5;
+    }
+  }
+  // A weak pull towards the middle keeps the network together.
+  const middle = centroid(positions);
+  for (let i = 0; i < n; i += 1) {
+    moves[i].x += (middle.x - positions[i].x) * 0.002;
+    moves[i].y += (middle.y - positions[i].y) * 0.002;
+  }
+  for (let i = 0; i < n; i += 1) {
+    const length = Math.hypot(moves[i].x, moves[i].y);
+    const k = length > temperature ? temperature / length : 1;
+    positions[i].x += moves[i].x * k;
+    positions[i].y += moves[i].y * k;
+  }
+  separate(nodes, positions, minSpace);
+}
+
+/** One run of the simulation at a fixed scale, from the given positions, until the goals are met or it has cooled. */
+function simulate(network: Network, start: Point[], scale: number, maxIterations = MAX_ITERATIONS): Trial {
+  const positions = start.map((p) => ({ ...p }));
   const startTemperature = 40 * scale;
   let lastRouted = -Infinity;
 
@@ -175,52 +255,7 @@ function simulate(network: Network, start: Point[], scale: number, maxIterations
     }
     if (iteration >= maxIterations) break;
 
-    const moves = positions.map(() => ({ x: 0, y: 0 }));
-    const push = (i: number, j: number, amount: number) => {
-      // Moves i and j apart (or, for a negative amount, together) by `amount` in all, along the line between them.
-      let dx = positions[j].x - positions[i].x;
-      let dy = positions[j].y - positions[i].y;
-      let length = Math.hypot(dx, dy);
-      if (length < 1e-6) {
-        dx = Math.cos(i + j);
-        dy = Math.sin(i + j);
-        length = 1;
-      }
-      moves[i].x -= (dx / length) * amount * 0.5;
-      moves[i].y -= (dy / length) * amount * 0.5;
-      moves[j].x += (dx / length) * amount * 0.5;
-      moves[j].y += (dy / length) * amount * 0.5;
-    };
-
-    // Links pull or push their displays towards the middle of their range.
-    for (const { link, a, b } of links) {
-      const [lo, hi] = distanceRange(link.weight, scale);
-      const margin = (hi - lo) / 4;
-      const d = linkDistance(nodes[a], positions[a], nodes[b], positions[b]);
-      if (d < lo + margin) push(a, b, (lo + margin - d) * 0.8);
-      else if (d > hi - margin) push(a, b, -(d - (hi - margin)) * 0.8);
-    }
-    // Close displays push each other away.
-    for (let i = 0; i < n; i += 1) {
-      for (let j = i + 1; j < n; j += 1) {
-        const s = space(nodes[i], positions[i], nodes[j], positions[j]);
-        if (s < room) push(i, j, (room - s) * 0.2);
-      }
-    }
-    // A weak pull towards the middle keeps the network together.
-    const middle = centroid(positions);
-    for (let i = 0; i < n; i += 1) {
-      moves[i].x += (middle.x - positions[i].x) * 0.002;
-      moves[i].y += (middle.y - positions[i].y) * 0.002;
-    }
-    const temperature = startTemperature * (1 - iteration / maxIterations) + 1;
-    for (let i = 0; i < n; i += 1) {
-      const length = Math.hypot(moves[i].x, moves[i].y);
-      const k = length > temperature ? temperature / length : 1;
-      positions[i].x += moves[i].x * k;
-      positions[i].y += moves[i].y * k;
-    }
-    separate(nodes, positions, minSpace);
+    advance(network, positions, scale, startTemperature * (1 - iteration / maxIterations) + 1);
   }
   const { spaced, miss } = check(network, positions, scale);
   const paths = spaced ? routes(network, positions) : undefined;
@@ -327,6 +362,134 @@ function untangle(network: Network, trial: Trial): Trial {
   return best;
 }
 
+/** The links' misalignment (see alignmentCost) summed over the links of display i, or over all links if `i` is not given. */
+function misalignment(network: Network, positions: Point[], i?: number): number {
+  let total = 0;
+  for (const { a, b } of network.links) {
+    if (i === undefined || a === i || b === i) total += alignmentCost(positions[b].x - positions[a].x, positions[b].y - positions[a].y);
+  }
+  return total;
+}
+
+/**
+ * Other positions for display i that would line it up with a display it is linked to: for each such display, the
+ * position on its horizontal, vertical and diagonal axes nearest i (keeping either how far i is along the axis or how far
+ * it is from that display's centre, or putting it in the middle of the link's range of distances), and the middle of those
+ * on each link's nearest axis; each also part of the way there.
+ */
+function alignedPositions(network: Network, positions: Point[], i: number, scale: number): Point[] {
+  const here = positions[i];
+  const targets: Point[] = [];
+  const nearest: Point[] = [];
+  for (const { link, a, b } of network.links) {
+    if (a !== i && b !== i) continue;
+    const j = a === i ? b : a;
+    const other = positions[j];
+    const [dx, dy] = [here.x - other.x, here.y - other.y];
+    const [sx, sy] = [Math.sign(dx) || 1, Math.sign(dy) || 1];
+    const [ax, ay] = [Math.abs(dx), Math.abs(dy)];
+    const length = Math.hypot(dx, dy);
+    const [lo, hi] = distanceRange(link.weight, scale);
+    const along = (ux: number, uy: number, reach: number) => ({ x: other.x + ux * reach, y: other.y + uy * reach });
+    // How far along (ux, uy) from the other display i is when the link's distance is the middle of its range.
+    const middle = (ux: number, uy: number) => {
+      let [near, far] = [0, 4 * (length + hi + network.nodes[i].width + network.nodes[i].height)];
+      for (let step = 0; step < 30; step += 1) {
+        const reach = (near + far) / 2;
+        if (linkDistance(network.nodes[i], along(ux, uy, reach), network.nodes[j], other) < (lo + hi) / 2) near = reach;
+        else far = reach;
+      }
+      return along(ux, uy, far);
+    };
+    const axes = [
+      { cost: ay, projected: along(sx, 0, ax), rotated: along(sx, 0, length), centred: middle(sx, 0) },
+      { cost: ax, projected: along(0, sy, ay), rotated: along(0, sy, length), centred: middle(0, sy) },
+      { cost: Math.abs(ax - ay) / Math.SQRT2 + DIAGONAL_PENALTY, projected: along(sx, sy, (ax + ay) / 2), rotated: along(sx / Math.SQRT2, sy / Math.SQRT2, length), centred: middle(sx / Math.SQRT2, sy / Math.SQRT2) },
+    ];
+    for (const axis of axes) targets.push(axis.projected, axis.rotated, axis.centred);
+    nearest.push(axes.reduce((best, axis) => (axis.cost < best.cost ? axis : best)).projected);
+  }
+  if (nearest.length > 1) targets.push(centroid(nearest));
+  return targets.flatMap((target) => [1, 0.5, 0.25].map((t) => ({ x: here.x + (target.x - here.x) * t, y: here.y + (target.y - here.y) * t })));
+}
+
+/**
+ * Lets the simulation run on from a layout that meets its goals with each link also pulling its displays towards lining up
+ * (see advance), checking every ALIGN_CHECK iterations whether the positions are better aligned than the best so far and
+ * still as close to the goals (see asClose) with no more crossing links; the best such positions are kept. This moves
+ * several displays at once, which `align` (below) cannot.
+ */
+function settle(network: Network, trial: Trial): Trial {
+  if (network.links.length === 0) return trial;
+  let best = trial;
+  let crossings = countCrossings(best.paths ?? routes(network, best.positions)).count;
+  let cost = misalignment(network, best.positions);
+  let runs = Math.max(1, Math.floor(ALIGN_PATHS / network.links.length));
+  const positions = best.positions.map((p) => ({ ...p }));
+  for (let iteration = 1; iteration <= ALIGN_ITERATIONS && cost > 0 && runs > 0; iteration += 1) {
+    advance(network, positions, best.scale, ALIGN_STEP * best.scale, ALIGN_BIAS);
+    if (iteration % ALIGN_CHECK !== 0) continue;
+    const now = misalignment(network, positions);
+    if (now >= cost - 1e-6) continue;
+    const { spaced, miss } = check(network, positions, best.scale);
+    if (!spaced || miss / best.scale > best.miss + 1e-9) continue;
+    runs -= 1;
+    const paths = routes(network, positions);
+    const clear = paths.every((path) => path.clear);
+    const attempt: Trial = { positions: positions.map((p) => ({ ...p })), scale: best.scale, met: miss === 0 && clear, routedAndSpaced: clear, miss: miss / best.scale, paths };
+    if (!asClose(attempt, best)) continue;
+    const result = countCrossings(paths).count;
+    if (result > crossings) continue;
+    best = attempt;
+    crossings = result;
+    cost = now;
+  }
+  return best;
+}
+
+/**
+ * Biases the positions towards the ideal (see alignmentCost): nodes joined by a link line up on a horizontal or vertical
+ * axis, with each centred across it, or failing that on a diagonal one. It moves one display at a time to the position
+ * that lines it up best, and keeps the move only if the layout stays as close to its goals as it was (see asClose) and has
+ * no more crossing links, so the goals always win and the bias gets the layout as close to the ideal as they allow.
+ */
+function align(network: Network, trial: Trial): Trial {
+  if (network.links.length === 0) return trial;
+  let best = trial;
+  let crossings = countCrossings(best.paths ?? routes(network, best.positions)).count;
+  let runs = Math.max(1, Math.floor(ALIGN_PATHS / network.links.length));
+  for (let pass = 0; pass < ALIGN_PASSES; pass += 1) {
+    let improved = false;
+    for (let i = 0; i < network.nodes.length; i += 1) {
+      const now = misalignment(network, best.positions, i);
+      if (now === 0) continue;
+      const moves = alignedPositions(network, best.positions, i, best.scale)
+        .map((at) => ({ at, cost: misalignment(network, best.positions.map((p, k) => (k === i ? at : p)), i) }))
+        .filter(({ cost }) => cost < now - 1e-6)
+        .sort((p, q) => p.cost - q.cost);
+      for (const { at } of moves) {
+        const positions = best.positions.map((p, k) => (k === i ? at : { ...p }));
+        const { spaced, miss } = check(network, positions, best.scale);
+        if (!spaced || miss / best.scale > best.miss + 1e-9) continue;
+        if (runs === 0) return best;
+        runs -= 1;
+        const paths = routes(network, positions);
+        const clear = paths.every((path) => path.clear);
+        const attempt: Trial = { positions, scale: best.scale, met: miss === 0 && clear, routedAndSpaced: clear, miss: miss / best.scale, paths };
+        if (!asClose(attempt, best)) continue;
+        const result = countCrossings(paths).count;
+        if (result > crossings) continue;
+        best = attempt;
+        crossings = result;
+        improved = true;
+        break;
+      }
+    }
+    if (!improved) break;
+  }
+  return best;
+}
+
 /** `points` stretched (or shrunk) about their middle by `factor`. */
 function stretch(points: Point[], factor: number): Point[] {
   const middle = centroid(points);
@@ -383,6 +546,8 @@ export function runLayout(nodes: LayoutNode[], links: LayoutLink[], previous: Ma
     trial = routedAndSpaced.find((t) => t.miss <= closest * 1.05 + 1) ?? trial;
   }
   trial = untangle(network, trial);
+  // The bias only has goals to keep when they were met.
+  if (trial.met) trial = align(network, settle(network, trial));
   return {
     positions: new Map(nodes.map((node, i) => [node.id, trial.positions[i]])),
     scale: trial.scale,

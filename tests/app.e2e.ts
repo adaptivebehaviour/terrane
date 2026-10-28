@@ -30,7 +30,7 @@ async function launch(userData: string, workspace?: string, files: string[] = []
   return { app, page, requests };
 }
 
-/** The plus button, then "Select a file" (the native file dialog is answered by AB_E2E_PICK_FILE). */
+/** The plus button, then "Import" (the native file dialog is answered by AB_E2E_PICK_FILE). */
 async function addSelectedFile(page: Page): Promise<void> {
   await page.getByTestId('add').click();
   await page.getByTestId('choose-file').click();
@@ -210,8 +210,12 @@ test.describe('electron shell: workspace', () => {
       try {
         await expect(page.getByTestId('workspace')).toBeVisible();
         await page.getByTestId('add').click();
-        await expect(page.getByTestId('choose-text')).toBeVisible();
+        await expect(page.getByTestId('choose-create')).toBeVisible();
         await expect(page.getByTestId('choose-file')).toBeVisible();
+        await expect(page.getByTestId('choose-text')).toHaveCount(0); // the submenu opens on hover
+        await page.getByTestId('choose-create').hover();
+        await expect(page.getByTestId('choose-text')).toHaveText('.txt');
+        await expect(page.getByTestId('choose-information')).toHaveText('note');
         await page.getByTestId('choose-text').click();
         await expect(page.getByTestId('text-create')).toBeDisabled(); // a filename is required
         await page.getByTestId('text-name').fill('shopping');
@@ -229,11 +233,13 @@ test.describe('electron shell: workspace', () => {
 
         // The same name again does not overwrite; an invalid name is refused and nothing is created.
         await page.getByTestId('add').click();
+        await page.getByTestId('choose-create').hover();
         await page.getByTestId('choose-text').click();
         await page.getByTestId('text-name').fill('shopping.txt');
         await page.getByTestId('text-create').click();
         await expect(node).toHaveText(['shopping.txt', 'shopping (1).txt']);
         await page.getByTestId('add').click();
+        await page.getByTestId('choose-create').hover();
         await page.getByTestId('choose-text').click();
         await page.getByTestId('text-name').fill('a/b');
         await page.getByTestId('text-create').click();
@@ -242,12 +248,195 @@ test.describe('electron shell: workspace', () => {
 
         // Cancelling creates nothing.
         await page.getByTestId('add').click();
+        await page.getByTestId('choose-create').hover();
         await page.getByTestId('choose-text').click();
         await page.getByTestId('text-name').fill('never');
         await page.keyboard.press('Escape');
         await expect(page.getByTestId('add-dialog')).toHaveCount(0);
         await expect(node).toHaveCount(2);
         expect((await readdir(workspace)).sort()).toEqual(['.lock', 'shopping (1).txt', 'shopping.txt', 'workspace.json']);
+      } finally {
+        await app.close().catch(() => undefined);
+      }
+    });
+  });
+
+  test('right-clicking an empty part of the canvas opens the add popup at the pointer; "note" in it creates an information node', async () => {
+    await withTemp(async (dir) => {
+      const { app, page } = await launch(join(dir, 'userData'), join(dir, 'ws'));
+      try {
+        await expect(page.getByTestId('workspace')).toBeVisible();
+        await page.getByTestId('workspace').click({ button: 'right', position: { x: 300, y: 200 } });
+        const menu = page.getByTestId('add-menu');
+        await expect(menu).toBeVisible();
+        const canvas = (await page.getByTestId('workspace').boundingBox())!;
+        const at = (await menu.boundingBox())!;
+        expect(Math.abs(at.x - (canvas.x + 300))).toBeLessThan(2);
+        expect(Math.abs(at.y - (canvas.y + 200))).toBeLessThan(2);
+
+        await page.getByTestId('choose-create').hover();
+        await page.getByTestId('choose-information').click();
+        await expect(menu).toHaveCount(0);
+        await page.getByTestId('information-text').fill('remember');
+        await page.getByTestId('information-create').click();
+        await expect(page.getByTestId('node')).toHaveText('remember');
+
+        // Escape closes the popup without choosing anything.
+        await page.getByTestId('workspace').click({ button: 'right', position: { x: 300, y: 200 } });
+        await expect(menu).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(menu).toHaveCount(0);
+      } finally {
+        await app.close().catch(() => undefined);
+      }
+    });
+  });
+
+  test('double-clicking a file node opens the file with the system; double-clicking a note opens the note dialog with its text', async () => {
+    await withTemp(async (dir) => {
+      const { app, page } = await launch(join(dir, 'userData'), join(dir, 'ws'));
+      try {
+        await expect(page.getByTestId('workspace')).toBeVisible();
+        // Stand in for the system's file association, so the test opens nothing.
+        await app.evaluate(({ shell }) => {
+          const opened: string[] = [];
+          (globalThis as unknown as { opened: string[] }).opened = opened;
+          shell.openPath = async (path: string) => (opened.push(path), '');
+        });
+
+        await page.getByTestId('add').click();
+        await page.getByTestId('choose-create').hover();
+        await page.getByTestId('choose-text').click();
+        await page.getByTestId('text-name').fill('shopping');
+        await page.getByTestId('text-create').click();
+        await page.getByTestId('add').click();
+        await page.getByTestId('choose-create').hover();
+        await page.getByTestId('choose-information').click();
+        await page.getByTestId('information-text').fill('remember\nthe milk');
+        await page.getByTestId('information-create').click();
+        await expect(page.getByTestId('node')).toHaveCount(2);
+
+        await page.locator('[data-handler=default]').dblclick();
+        await expect.poll(() => app.evaluate(() => (globalThis as unknown as { opened: string[] }).opened)).toEqual([join(dir, 'ws', 'shopping.txt')]);
+        await expect(page.getByTestId('information-text')).toHaveCount(0);
+
+        await page.locator('[data-handler=text]').dblclick();
+        await expect(page.getByTestId('information-text')).toHaveValue('remember\nthe milk');
+        await expect(page.getByTestId('information-update')).toHaveText('Update');
+        await expect(page.getByTestId('update-dialog')).toBeVisible();
+        await expect(page.getByTestId('update-dialog')).not.toContainText('Information');
+        await page.keyboard.press('Escape');
+        await expect(page.getByTestId('update-dialog')).toHaveCount(0);
+        expect(await app.evaluate(() => (globalThis as unknown as { opened: string[] }).opened)).toHaveLength(1);
+
+        // Saving the dialog replaces the note's text; no new note appears.
+        await page.locator('[data-handler=text]').dblclick();
+        await page.getByTestId('information-text').fill('remember the bread');
+        await page.getByTestId('information-update').click();
+        await expect(page.getByTestId('update-dialog')).toHaveCount(0);
+        await expect(page.getByTestId('node')).toHaveCount(2);
+        await expect(page.locator('[data-handler=text]')).toHaveText('remember the bread');
+        const info = JSON.parse(await readFile(join(dir, 'ws', 'workspace.json'), 'utf8'));
+        expect(info.nodes.filter((node: { items?: string[] }) => node.items)).toMatchObject([{ items: ['remember the bread'] }]);
+      } finally {
+        await app.close().catch(() => undefined);
+      }
+    });
+  });
+
+  test('right-clicking a node opens the note dialog; the new note is linked to that node with a weight of 10', async () => {
+    await withTemp(async (dir) => {
+      const { app, page } = await launch(join(dir, 'userData'), join(dir, 'ws'));
+      try {
+        await expect(page.getByTestId('workspace')).toBeVisible();
+        await page.getByTestId('add').click();
+        await page.getByTestId('choose-create').hover();
+        await page.getByTestId('choose-text').click();
+        await page.getByTestId('text-name').fill('shopping');
+        await page.getByTestId('text-create').click();
+        await expect(page.getByTestId('node')).toHaveCount(1);
+
+        await page.getByTestId('node').click({ button: 'right' });
+        await expect(page.getByTestId('add-menu')).toHaveCount(0); // not the popup for an empty part
+        await expect(page.getByTestId('information-text')).toHaveValue('');
+        await expect(page.getByTestId('add-dialog')).not.toContainText('Information');
+        await expect(page.getByTestId('information-create')).toHaveText('Create');
+        await page.getByTestId('information-text').fill('buy milk');
+        await page.getByTestId('information-create').click();
+        await expect(page.getByTestId('add-dialog')).toHaveCount(0);
+        await expect(page.getByTestId('node')).toHaveCount(2);
+        await expect(page.getByTestId('link')).toHaveCount(1);
+
+        const info = JSON.parse(await readFile(join(dir, 'ws', 'workspace.json'), 'utf8'));
+        const file = info.nodes.find((node: { filename?: string }) => node.filename);
+        const note = info.nodes.find((node: { items?: string[] }) => node.items);
+        expect(note.items).toEqual(['buy milk']);
+        expect(info.links).toMatchObject([{ source: note.id, target: file.id, weight: 10 }]);
+      } finally {
+        await app.close().catch(() => undefined);
+      }
+    });
+  });
+
+  test('linked nodes line up on a horizontal or vertical axis, centred on it, and their link joins the facing connection points', async () => {
+    await withTemp(async (dir) => {
+      const { app, page } = await launch(join(dir, 'userData'), join(dir, 'ws'));
+      try {
+        await expect(page.getByTestId('workspace')).toBeVisible();
+        await page.getByTestId('add').click();
+        await page.getByTestId('choose-create').hover();
+        await page.getByTestId('choose-text').click();
+        await page.getByTestId('text-name').fill('hub');
+        await page.getByTestId('text-create').click();
+        for (const note of ['one', 'two', 'three']) {
+          await page.locator('[data-handler=default]').click({ button: 'right' });
+          await page.getByTestId('information-text').fill(note);
+          await page.getByTestId('information-create').click();
+          await expect(page.getByTestId('add-dialog')).toHaveCount(0);
+        }
+        await expect(page.getByTestId('link')).toHaveCount(3);
+
+        const boxes = async () => {
+          const found = await page.getByTestId('node').evaluateAll((elements) => elements.map((element) => {
+            const { left, top, width, height } = element.getBoundingClientRect();
+            return { handler: element.getAttribute('data-handler'), left, top, width, height };
+          }));
+          return found.map((box) => ({ ...box, cx: box.left + box.width / 2, cy: box.top + box.height / 2 }));
+        };
+        // Each note is on an axis through the centre of the node it is linked to (the layout settles a moment after the last note appears).
+        await expect
+          .poll(async () => {
+            const all = await boxes();
+            const hub = all.find((box) => box.handler === 'default')!;
+            return all.filter((box) => box.handler === 'text').map((note) => Math.min(Math.abs(note.cx - hub.cx), Math.abs(note.cy - hub.cy)) < 1.5);
+          })
+          .toEqual([true, true, true]);
+
+        // Every link is a straight line that starts and ends at the midpoint of an edge of a display.
+        const all = await boxes();
+        const ends = await page.getByTestId('link-line').evaluateAll((paths) =>
+          paths.map((path) => {
+            const svg = path as unknown as SVGGeometryElement;
+            const matrix = svg.getScreenCTM()!;
+            const at = (length: number) => {
+              const point = svg.getPointAtLength(length);
+              return { x: point.x * matrix.a + point.y * matrix.c + matrix.e, y: point.x * matrix.b + point.y * matrix.d + matrix.f };
+            };
+            return [at(0), at(svg.getTotalLength())];
+          }),
+        );
+        const onMidpoint = (point: { x: number; y: number }) =>
+          all.some(
+            (box) =>
+              (Math.abs(point.y - box.cy) < 1.5 && (Math.abs(point.x - box.left) < 1.5 || Math.abs(point.x - (box.left + box.width)) < 1.5)) ||
+              (Math.abs(point.x - box.cx) < 1.5 && (Math.abs(point.y - box.top) < 1.5 || Math.abs(point.y - (box.top + box.height)) < 1.5)),
+          );
+        expect(ends).toHaveLength(3);
+        for (const [from, to] of ends) {
+          expect(Math.min(Math.abs(from.x - to.x), Math.abs(from.y - to.y))).toBeLessThan(1.5);
+          expect(onMidpoint(from)).toBe(true);
+          expect(onMidpoint(to)).toBe(true);
+        }
       } finally {
         await app.close().catch(() => undefined);
       }
@@ -308,7 +497,7 @@ test.describe('electron shell: security', () => {
         protocol: location.protocol,
       }));
       expect(exposed).toMatchObject({ require: 'undefined', process: 'undefined', buffer: 'undefined', electron: 'undefined', isolated: true, protocol: 'app:' });
-      expect(exposed.workspaceBridge).toEqual(['addFile', 'createInformation', 'createLink', 'createText', 'current', 'open', 'readNode', 'setLinkWeight']);
+      expect(exposed.workspaceBridge).toEqual(['addFile', 'createInformation', 'createInformationLinked', 'createLink', 'createText', 'current', 'open', 'openNode', 'readNode', 'setLinkWeight', 'updateInformation']);
       expect(exposed.groups).toEqual(['app', 'credentials', 'net', 'sidecar']);
       await app.close();
     });

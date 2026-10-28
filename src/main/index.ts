@@ -147,6 +147,7 @@ if (!app.requestSingleInstanceLock()) {
       createdBy: `${APP_ID} ${app.getVersion()}`,
       pickFolder: () => pickFolder('open'),
       pickFile,
+      openPath: (path) => shell.openPath(path),
       onOpened: () => sidecar?.start(),
       onClosed: () => sidecar?.stop(),
       onHookError: (error) => log('[workspace] hook failed:', error instanceof Error ? error.message : error),
@@ -157,6 +158,11 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle('terrane:workspace.current', (event) => (trusted(event), workspace.state()));
     ipcMain.handle('terrane:workspace.open', (event) => (trusted(event), workspace.open()));
     ipcMain.handle('terrane:workspace.readNode', (event, id: unknown) => (trusted(event), typeof id === 'string' ? workspace.readNode(id) : Promise.reject(new Error('Invalid node id'))));
+    ipcMain.handle('terrane:workspace.openNode', (event, id: unknown) => {
+      trusted(event);
+      if (typeof id !== 'string') throw new Error('Invalid node id');
+      return workspace.openNode(id);
+    });
     ipcMain.handle('terrane:workspace.createText', (event, name: unknown, text: unknown) => {
       trusted(event);
       if (typeof name !== 'string' || typeof text !== 'string') throw new Error('Invalid text file');
@@ -166,6 +172,16 @@ if (!app.requestSingleInstanceLock()) {
       trusted(event);
       if (typeof text !== 'string') throw new Error('Invalid information node');
       return workspace.createInformation(text);
+    });
+    ipcMain.handle('terrane:workspace.createInformationLinked', (event, text: unknown, target: unknown) => {
+      trusted(event);
+      if (typeof text !== 'string' || typeof target !== 'string') throw new Error('Invalid information node');
+      return workspace.createInformationLinked(text, target);
+    });
+    ipcMain.handle('terrane:workspace.updateInformation', (event, id: unknown, text: unknown) => {
+      trusted(event);
+      if (typeof id !== 'string' || typeof text !== 'string') throw new Error('Invalid information node');
+      return workspace.updateInformation(id, text);
     });
     ipcMain.handle('terrane:workspace.createLink', (event, source: unknown, target: unknown) => {
       trusted(event);
