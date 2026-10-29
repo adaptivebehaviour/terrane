@@ -21,6 +21,9 @@
       "vite/client"
     ],
     "paths": {
+      "@adaptivebehaviour/data/src/*": [
+        "./node_modules/@adaptivebehaviour/data/src/*"
+      ],
       "@adaptivebehaviour/desktop/src/*": [
         "./node_modules/@adaptivebehaviour/desktop/src/*"
       ],

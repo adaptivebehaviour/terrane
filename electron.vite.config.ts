@@ -6,6 +6,7 @@ import { defineConfig } from 'electron-vite';
 // into the main and preload builds instead of being left as `require()` calls. (The sandboxed preload may require
 // nothing but `electron`, so it must be fully bundled anyway.)
 const bundled = [
+  '@adaptivebehaviour/data',
   '@adaptivebehaviour/desktop',
   '@adaptivebehaviour/manifesto',
   '@adaptivebehaviour/scenes',

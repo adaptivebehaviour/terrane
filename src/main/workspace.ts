@@ -54,12 +54,8 @@ export interface OpenResult {
 }
 
 export interface WorkspaceOptions {
-  /** File (in the app's own data folder) remembering the last workspace. */
-  settingsFile: string;
   appId: string;
   createdBy: string;
-  /** Shows the folder dialog; resolves with `undefined` if the user cancels. */
-  pickFolder: () => Promise<string | undefined>;
   /** Shows the file dialog (a single file); resolves with `undefined` if the user cancels. */
   pickFile: () => Promise<string | undefined>;
   /** Opens a file with the application the system associates with its type; resolves with an error message, or an empty string if it worked. */
@@ -85,8 +81,9 @@ async function exists(path: string): Promise<boolean> {
 }
 
 /**
- * The workspace: a folder the user picks. It holds a `workspace.json` (written if the folder has none) and a `.lock`
- * while open, so that two instances of the app cannot open it at once. The app remembers the last workspace.
+ * The workspace: the folder that the framework's workspace manager has created or opened (see `main/index.ts`). It holds a
+ * `workspace.json` (written if the folder has none) and a `.lock` while open, so that two instances of the app cannot open
+ * it at once.
  */
 export class Workspace {
   private root: string | undefined;
@@ -100,26 +97,9 @@ export class Workspace {
     return this.root ? { open: true, name: basename(this.root), nodes: this.nodes, links: this.links } : { open: false, nodes: [], links: [] };
   }
 
-  /** Reopens the last workspace, if it is still a workspace folder. */
-  async reopenLast(): Promise<void> {
-    let folder: unknown;
-    try {
-      folder = JSON.parse(await readFile(this.options.settingsFile, 'utf8')).path;
-    } catch {
-      return; // no (readable) record of a last workspace
-    }
-    if (typeof folder === 'string' && (await exists(join(folder, WORKSPACE_FILE)))) await this.openFolder(folder);
-  }
-
-  async open(): Promise<OpenResult> {
-    try {
-      const folder = await this.options.pickFolder();
-      if (!folder) return { status: 'cancelled', workspace: this.state() };
-      await this.openFolder(folder);
-      return { status: 'opened', workspace: this.state() };
-    } catch (error) {
-      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
-    }
+  /** The open workspace's folder. */
+  get path(): string | undefined {
+    return this.root;
   }
 
   /** Lets the user pick a file, copies it into the workspace folder and records it in the `nodes` of `workspace.json`. */
@@ -282,7 +262,8 @@ export class Workspace {
     await this.runHook(() => this.options.onClosed?.());
   }
 
-  private async openFolder(folder: string): Promise<void> {
+  /** Opens `folder` as the workspace: writes its `workspace.json` if it has none, takes the lock and loads the nodes and links. Fails, leaving the current workspace open, if another instance holds the lock. */
+  async openFolder(folder: string): Promise<void> {
     if (folder === this.root) return;
     await this.ensureWorkspaceFile(folder);
     // Take the new lock before letting go of the current workspace, so a failed switch leaves it open.
@@ -301,7 +282,6 @@ export class Workspace {
     this.lock = lock;
     this.nodes = nodes;
     this.links = links;
-    await writeFile(this.options.settingsFile, JSON.stringify({ path: folder }, null, 2) + '\n');
     await this.runHook(() => this.options.onOpened?.(folder));
   }
 

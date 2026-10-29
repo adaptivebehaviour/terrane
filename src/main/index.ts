@@ -1,5 +1,5 @@
-import { createHandlers } from '@adaptivebehaviour/desktop/src/main/index';
-import { registerHandlers, type IpcEventLike } from '@adaptivebehaviour/desktop/src/ipc/index';
+import { createHandlers, Settings, WorkspaceManager, type WorkspaceInfo } from '@adaptivebehaviour/desktop/src/main/index';
+import { DesktopError, registerHandlers, type IpcEventLike } from '@adaptivebehaviour/desktop/src/ipc/index';
 import { buildCsp, EnvironmentCredentials, NetworkServices } from '@adaptivebehaviour/desktop/src/net/index';
 import { app, BrowserWindow, dialog, ipcMain, net as electronNet, protocol, session, shell } from 'electron';
 import { delimiter, join, normalize, sep } from 'node:path';
@@ -24,15 +24,13 @@ function isAppUrl(url: string): boolean {
 /** Test-only: in a development run (never a packaged one) AB_E2E_PICK_FOLDER answers the folder dialogs, one path per dialog. */
 const scriptedFolders: string[] = !app.isPackaged && process.env['AB_E2E_PICK_FOLDER'] ? process.env['AB_E2E_PICK_FOLDER'].split(delimiter) : [];
 
-async function pickFolder(purpose: 'create' | 'open'): Promise<string | undefined> {
-  if (scriptedFolders.length > 0) return scriptedFolders.shift();
-  const options: Electron.OpenDialogOptions = {
-    title: purpose === 'create' ? 'Choose an empty folder for the new workspace' : 'Choose a workspace folder',
-    properties: purpose === 'create' ? ['openDirectory', 'createDirectory'] : ['openDirectory'],
-  };
-  const window = BrowserWindow.getFocusedWindow();
-  const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
-  return result.canceled ? undefined : result.filePaths[0];
+/** Shows the OS folder picker over the window, opened at `defaultPath`. `null` if the user cancels. */
+async function pickFolder({ title, defaultPath }: { title: string; defaultPath: string }): Promise<string | null> {
+  if (scriptedFolders.length > 0) return scriptedFolders.shift() ?? null;
+  const options: Electron.OpenDialogOptions = { title, defaultPath, properties: ['openDirectory', 'createDirectory'] };
+  const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+  return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]!;
 }
 
 /** Test-only: in a development run AB_E2E_PICK_FILE answers the file dialogs, one path per dialog. */
@@ -128,35 +126,54 @@ if (!app.requestSingleInstanceLock()) {
       allowedEnv: services.flatMap((service) => (service.credential ? [service.credential.env] : [])),
     });
     const net = new NetworkServices({ services, credentials: new EnvironmentCredentials(), log });
-    // The framework's own API (records, sessions, files, …) is registered but unused: no framework workspace is opened.
-    const handlers = createHandlers({
-      app: { name: APP_NAME, version: app.getVersion(), platform: process.platform },
-      net,
-      sidecar,
-    });
-    registerHandlers(ipcMain, handlers, {
-      isTrustedSender: (event: IpcEventLike) => isAppUrl(event.senderFrame?.url ?? ''),
-      onError: (channel, error) => log(`[ipc] ${channel} failed:`, error instanceof Error ? error.message : error),
-    });
-
-    // The workspace is a folder the user picks; the last one is reopened at startup. With none open, the renderer
-    // asks the user to select a folder.
+    // Which workspace to open is the framework's: workspaces are created in a location (Documents until the user chooses
+    // another), and the last workspace and location are remembered in settings.json in the user-data folder.
+    const settings = new Settings(join(app.getPath('userData'), 'settings.json'));
+    const manager = new WorkspaceManager({ defaultLocation: app.getPath('documents'), pickFolder, settings });
+    // What the workspace holds is Terrane's: a workspace.json and a lock, which the framework knows nothing of.
     const workspace = new Workspace({
-      settingsFile: join(app.getPath('userData'), 'last-workspace.json'),
       appId: APP_ID,
       createdBy: `${APP_ID} ${app.getVersion()}`,
-      pickFolder: () => pickFolder('open'),
       pickFile,
       openPath: (path) => shell.openPath(path),
       onOpened: () => sidecar?.start(),
       onClosed: () => sidecar?.stop(),
       onHookError: (error) => log('[workspace] hook failed:', error instanceof Error ? error.message : error),
     });
+    /** Opens the folder the manager has just made current as Terrane's workspace; if that fails, the manager's choice is undone. */
+    const attach = async (info: WorkspaceInfo): Promise<WorkspaceInfo> => {
+      const previous = workspace.path;
+      try {
+        await workspace.openFolder(info.path);
+      } catch (error) {
+        await settings.save({ lastWorkspace: previous }).catch(() => undefined);
+        throw new DesktopError('workspace_failed', error instanceof Error ? error.message : String(error));
+      }
+      return info;
+    };
+    const handlers = createHandlers({
+      app: { name: APP_NAME, version: app.getVersion(), platform: process.platform },
+      net,
+      sidecar,
+      workspaces: {
+        beginNew: () => manager.beginNew(),
+        chooseLocation: () => manager.chooseLocation(),
+        create: async (name) => attach(await manager.create(name)),
+        open: async () => {
+          const info = await manager.open();
+          return info && attach(info);
+        },
+      },
+    });
+    registerHandlers(ipcMain, handlers, {
+      isTrustedSender: (event: IpcEventLike) => isAppUrl(event.senderFrame?.url ?? ''),
+      onError: (channel, error) => log(`[ipc] ${channel} failed:`, error instanceof Error ? error.message : error),
+    });
+
     const trusted = (event: Electron.IpcMainInvokeEvent) => {
       if (!isAppUrl(event.senderFrame?.url ?? '')) throw new Error('Untrusted sender');
     };
     ipcMain.handle('terrane:workspace.current', (event) => (trusted(event), workspace.state()));
-    ipcMain.handle('terrane:workspace.open', (event) => (trusted(event), workspace.open()));
     ipcMain.handle('terrane:workspace.readNode', (event, id: unknown) => (trusted(event), typeof id === 'string' ? workspace.readNode(id) : Promise.reject(new Error('Invalid node id'))));
     ipcMain.handle('terrane:workspace.openNode', (event, id: unknown) => {
       trusted(event);
@@ -195,7 +212,8 @@ if (!app.requestSingleInstanceLock()) {
     });
     ipcMain.handle('terrane:workspace.addFile', (event) => (trusted(event), workspace.addFile()));
     try {
-      await workspace.reopenLast();
+      await manager.restore();
+      if (manager.workspace) await workspace.openFolder(manager.workspace.path);
     } catch (error) {
       log('[workspace] could not reopen the last workspace:', error instanceof Error ? error.message : error);
     }

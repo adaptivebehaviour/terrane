@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { ab } from './ab';
 import { AddDialog } from './AddDialog';
 import { AddMenu } from './AddMenu';
 import { Canvas } from './Canvas';
 import { isInformationNode } from './handlers';
 import folderOpenIcon from './icons/folder-open.svg';
+import folderPlusIcon from './icons/folder-plus.svg';
 import plusIcon from './icons/plus.svg';
+import { NewWorkspaceDialog } from './NewWorkspaceDialog';
 import { CreateNoteDialog, UpdateNoteDialog } from './NoteDialogs';
 
 /**
- * A toolbar (open workspace, plus) above the canvas, which shows the network. The workspace is the folder the user selects: the main
- * process reopens the last one at startup, and when none is open the folder dialog is shown until one is chosen.
+ * A toolbar (new workspace, open workspace, plus) above the canvas, which shows the network. Workspaces are created and opened
+ * the framework's way (`ab.workspace`); the main process reopens the last one at startup.
  */
 export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>();
@@ -17,15 +20,25 @@ export function App() {
   const [menu, setMenu] = useState<{ x: number; y: number }>();
   /** The dialog being shown: a new `.txt` file, a new note (linked to a node, if `linkTo` is given), or an existing note's update. */
   const [dialog, setDialog] = useState<{ kind: 'text' } | { kind: 'note'; linkTo?: string } | { kind: 'update'; nodeId: string; text: string }>();
-  const forced = useRef(false);
+  /** The location the "new workspace" dialog starts with; `null` while the dialog is closed. */
+  const [newWorkspaceLocation, setNewWorkspaceLocation] = useState<string | null>(null);
 
-  const openWorkspace = useCallback(async (): Promise<'opened' | 'cancelled' | 'failed'> => {
+  const showWorkspace = useCallback(() => window.workspaceBridge.current().then(setWorkspace), []);
+
+  const newWorkspace = async () => {
     setError(undefined);
-    const result = await window.workspaceBridge.open();
-    setWorkspace(result.workspace);
-    if (result.status === 'failed') setError(result.message);
-    return result.status;
-  }, []);
+    setNewWorkspaceLocation((await ab.workspace.beginNew()).location);
+  };
+
+  const openWorkspace = useCallback(async () => {
+    setError(undefined);
+    try {
+      await ab.workspace.open();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    }
+    await showWorkspace();
+  }, [showWorkspace]);
 
   /** Runs a change to the network and shows the workspace it leaves (or the error). */
   const change = async (action: () => Promise<WorkspaceResult>) => {
@@ -50,14 +63,14 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void window.workspaceBridge.current().then(setWorkspace);
-  }, []);
+    void showWorkspace();
+  }, [showWorkspace]);
 
   // Hotkeys for the toolbar buttons: Ctrl+O opens a workspace, Ctrl+N adds. Like the buttons, they do nothing while a
   // dialog is open. (Electron's default menu, which Terrane keeps, uses neither.)
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!event.ctrlKey || event.shiftKey || event.altKey || event.metaKey || document.querySelector('dialog[open]')) return;
+      if (!event.ctrlKey || event.shiftKey || event.altKey || event.metaKey || document.querySelector('dialog[open], [role=dialog]')) return;
       const key = event.key.toLowerCase();
       if (key === 'o') {
         event.preventDefault();
@@ -71,19 +84,10 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [openWorkspace, openMenuAtButton]);
 
-  // With no workspace open, keep asking for a folder until one is opened. An error (shown below) ends the loop;
-  // the folder button remains available.
-  useEffect(() => {
-    if (!workspace || workspace.open || forced.current) return;
-    forced.current = true;
-    void (async () => {
-      while ((await openWorkspace()) === 'cancelled');
-    })();
-  }, [workspace, openWorkspace]);
-
   return (
     <div className="flex h-screen flex-col">
       <nav className="flex items-center gap-1 border-b border-slate-200 p-1" data-testid="toolbar">
+        <ToolbarButton label="New workspace" icon={folderPlusIcon} testId="new-workspace" onClick={() => void newWorkspace()} />
         <ToolbarButton label="Open workspace" icon={folderOpenIcon} testId="open-workspace" onClick={() => void openWorkspace()} />
         <ToolbarButton label="Add" icon={plusIcon} testId="add" onClick={openMenuAtButton} />
       </nav>
@@ -112,6 +116,18 @@ export function App() {
       )}
       {dialog?.kind === 'update' && (
         <UpdateNoteDialog text={dialog.text} onUpdate={(text) => void add(() => window.workspaceBridge.updateInformation(dialog.nodeId, text))} onCancel={() => setDialog(undefined)} />
+      )}
+      {newWorkspaceLocation !== null && (
+        <NewWorkspaceDialog
+          initialLocation={newWorkspaceLocation}
+          onChooseLocation={async () => (await ab.workspace.chooseLocation())?.location ?? null}
+          onCreate={async (name) => {
+            await ab.workspace.create({ name });
+            setNewWorkspaceLocation(null);
+            await showWorkspace();
+          }}
+          onCancel={() => setNewWorkspaceLocation(null)}
+        />
       )}
       {error && <p role="alert" data-testid="error" className="m-4 rounded bg-red-50 p-3 text-red-800">{error}</p>}
       {workspace?.open && (

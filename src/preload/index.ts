@@ -6,10 +6,9 @@ import { contextBridge, ipcRenderer } from 'electron';
 // from Node or Electron is exposed.
 contextBridge.exposeInMainWorld('abBridge', buildBridge((channel, payload) => ipcRenderer.invoke(channel, payload)));
 
-// The application's workspace: a folder the user picks (see main/workspace.ts).
+// What the open workspace holds (see main/workspace.ts). Creating and opening a workspace go through `abBridge.workspace`.
 contextBridge.exposeInMainWorld('workspaceBridge', {
   current: () => ipcRenderer.invoke('terrane:workspace.current'),
-  open: () => ipcRenderer.invoke('terrane:workspace.open'),
   readNode: (id: string) => ipcRenderer.invoke('terrane:workspace.readNode', id),
   openNode: (id: string) => ipcRenderer.invoke('terrane:workspace.openNode', id),
   createText: (name: string, text: string) => ipcRenderer.invoke('terrane:workspace.createText', name, text),

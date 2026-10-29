@@ -41,10 +41,9 @@ declare global {
   interface Window {
     /** Exposed by the preload script; wrapped into `ab` (see ab.ts). Not for direct use. */
     abBridge: AbBridge;
-    /** The application's workspace: a folder the user picks (see main/workspace.ts). */
+    /** What the open workspace holds (see main/workspace.ts). Creating and opening a workspace go through `abBridge.workspace`. */
     workspaceBridge: {
       current: () => Promise<WorkspaceState>;
-      open: () => Promise<WorkspaceResult>;
       /** Picks a file, copies it into the workspace folder and records it in `workspace.json`. */
       addFile: () => Promise<WorkspaceResult>;
       /** Creates a .txt file with the given name and text in the workspace folder and records it in `workspace.json`. */

@@ -10,7 +10,7 @@ import { join } from 'node:path';
 // applies the CSP, and has the hardening fuses set. Playwright's _electron API cannot drive it, because it relies on
 // Node's inspector switch, which a hardened build deliberately disables; so the app is started directly and attached
 // to over the Chromium DevTools protocol. Folder dialogs cannot be scripted in a packaged build, so this stays
-// short of creating a workspace (the unpackaged e2e tests cover that).
+// short of creating or opening a workspace (the unpackaged e2e tests cover that).
 const defaultExe = process.platform === 'win32' ? join(__dirname, '..', 'dist', 'win-unpacked', 'Terrane.exe') : '';
 const exe = process.env.AB_PACKAGED_EXE || defaultExe;
 
@@ -50,7 +50,7 @@ test.describe('packaged app', () => {
       expect(browser, 'could not attach to the packaged app').toBeTruthy();
       const context = browser!.contexts()[0];
       const page = context.pages()[0] ?? (await context.waitForEvent('page'));
-      await expect(page.getByTestId('workspace')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('toolbar')).toBeVisible({ timeout: 30_000 });
       expect(page.url()).toMatch(/^app:\/\/app\//);
 
       const facts = await page.evaluate(async () => ({
@@ -61,7 +61,7 @@ test.describe('packaged app', () => {
       }));
       expect(facts.csp).toContain("connect-src 'self'");
       expect(facts.nodeGlobals).toEqual(['undefined', 'undefined']);
-      expect(facts.groups).toEqual(['app', 'credentials', 'net', 'sidecar']);
+      expect(facts.groups).toEqual(['app', 'credentials', 'data', 'net', 'sidecar', 'workspace']);
       expect(facts.info).toMatchObject({ ok: true, value: { name: 'Terrane' } });
       await browser!.close();
     } finally {

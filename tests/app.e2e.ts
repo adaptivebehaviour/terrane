@@ -13,21 +13,30 @@ interface Launched {
 }
 
 /**
- * Starts the built app with its own user-data folder. With no current workspace the app asks for a folder; the folder
- * dialog is answered with `workspace` (default: a `workspace` folder inside the user-data folder).
+ * Starts the built app with its own user-data folder. The app reopens the last workspace on its own, and otherwise shows
+ * only the toolbar. The folder dialogs are answered, one folder per dialog, with `workspace` (none by default);
+ * several folders are separated by the path delimiter.
  */
 async function launch(userData: string, workspace?: string, files: string[] = []): Promise<Launched> {
   const app = await electron.launch({
     // GitHub's Linux runners restrict unprivileged user namespaces, which Chromium's own process sandbox needs.
     args: [appDir, `--user-data-dir=${userData}`, ...(process.platform === 'linux' && process.env.CI ? ['--no-sandbox'] : [])],
     cwd: appDir,
-    env: { ...process.env, AB_E2E_PICK_FOLDER: workspace ?? join(userData, 'workspace'), AB_E2E_PICK_FILE: files.join(delimiter), ELECTRON_RENDERER_URL: '' },
+    env: { ...process.env, AB_E2E_PICK_FOLDER: workspace ?? '', AB_E2E_PICK_FILE: files.join(delimiter), ELECTRON_RENDERER_URL: '' },
   });
   const page = await app.firstWindow();
   const requests: string[] = [];
   page.on('request', (request) => requests.push(request.url()));
   await page.waitForLoadState('domcontentloaded');
   return { app, page, requests };
+}
+
+/** Starts the app and opens the workspace folder `workspace` with the open-workspace button (the folder dialog is answered by AB_E2E_PICK_FOLDER). */
+async function launchOpened(userData: string, workspace: string, files: string[] = []): Promise<Launched> {
+  const launched = await launch(userData, workspace, files);
+  await launched.page.getByTestId('open-workspace').click();
+  await expect(launched.page.getByTestId('workspace')).toBeVisible();
+  return launched;
 }
 
 /** The plus button, then "Import" (the native file dialog is answered by AB_E2E_PICK_FILE). */
@@ -46,18 +55,23 @@ async function withTemp<T>(body: (dir: string) => Promise<T>): Promise<T> {
 }
 
 test.describe('electron shell: workspace', () => {
-  test('opens a workspace folder by itself, shows only the toolbar, and reopens it after a restart', async () => {
+  test('shows only the toolbar until a workspace folder is opened, and reopens it after a restart', async () => {
     await withTemp(async (dir) => {
       const userData = join(dir, 'userData');
       const workspace = join(dir, 'My Workspace');
 
       const first = await launch(userData, workspace);
-      await expect(first.page.getByTestId('workspace')).toBeVisible();
-      // The screen holds only the toolbar: an open-workspace button and an add button, with icons and no text.
+      // Nothing is asked for: the screen holds only the toolbar (a new-workspace, an open-workspace and an add button, with
+      // icons and no text), and no workspace is open.
+      await expect(first.page.getByTestId('toolbar')).toBeVisible();
+      await expect(first.page.getByTestId('workspace')).toHaveCount(0);
       expect((await first.page.locator('body').innerText()).trim()).toBe('');
       await expect(first.page.locator('input, h1, a')).toHaveCount(0);
-      await expect(first.page.locator('[data-testid=toolbar] button')).toHaveCount(2);
-      await expect(first.page.locator('[data-testid=toolbar] button').first()).toHaveAttribute('data-testid', 'open-workspace');
+      await expect(first.page.locator('[data-testid=toolbar] button')).toHaveCount(3);
+      expect(await first.page.locator('[data-testid=toolbar] button').evaluateAll((buttons) => buttons.map((button) => button.getAttribute('data-testid')))).toEqual(['new-workspace', 'open-workspace', 'add']);
+
+      await first.page.getByTestId('open-workspace').click();
+      await expect(first.page.getByTestId('workspace')).toBeVisible();
 
       // The folder holds a workspace.json, and a .lock while the app is open: nothing else.
       expect((await readdir(workspace)).sort()).toEqual(['.lock', 'workspace.json']);
@@ -76,13 +90,61 @@ test.describe('electron shell: workspace', () => {
     });
   });
 
-  test('with no current workspace the folder dialog is triggered and the chosen folder becomes the workspace', async () => {
+  test('new workspace asks for a name and a location, creates the folder there as a workspace, and reopens it after a restart', async () => {
     await withTemp(async (dir) => {
       const userData = join(dir, 'userData');
-      const { app, page } = await launch(userData);
-      await expect(page.getByTestId('workspace')).toBeVisible();
-      expect(await readdir(join(userData, 'workspace'))).toContain('workspace.json'); // the scripted dialog chose this folder
-      await app.close();
+      const location = join(dir, 'Locations');
+      await mkdir(location);
+      // The folder dialog is answered with `location` (for the "Location" button).
+      const first = await launch(userData, location);
+      try {
+        await first.page.getByTestId('new-workspace').click();
+        const dialog = first.page.getByRole('dialog');
+        await expect(dialog).toBeVisible();
+        await expect(dialog.getByRole('button', { name: 'Create' })).toBeDisabled(); // a name is required
+        await dialog.getByLabel('Name').fill('a/b');
+        await expect(dialog.getByRole('alert')).not.toHaveText('');
+        await dialog.getByLabel('Name').fill('Fresh');
+        await dialog.getByRole('button', { name: 'Location' }).click();
+        await expect(dialog.getByTestId('workspace-location')).toHaveText(location);
+        await dialog.getByRole('button', { name: 'Create' }).click();
+        await expect(first.page.getByTestId('workspace')).toBeVisible();
+        await expect(first.page.getByRole('dialog')).toHaveCount(0);
+
+        // The new folder is a Terrane workspace like any other: a workspace.json, and a .lock while the app is open.
+        expect((await readdir(join(location, 'Fresh'))).sort()).toEqual(['.lock', 'workspace.json']);
+        expect(JSON.parse(await readFile(join(location, 'Fresh', 'workspace.json'), 'utf8')).appId).toBe('terrane');
+        const settings = JSON.parse(await readFile(join(userData, 'settings.json'), 'utf8'));
+        expect(settings).toEqual({ lastWorkspace: join(location, 'Fresh'), workspaceLocation: location });
+      } finally {
+        await first.app.close().catch(() => undefined);
+      }
+
+      const second = await launch(userData, join(dir, 'never-picked'));
+      await expect(second.page.getByTestId('workspace')).toBeVisible();
+      await second.app.close();
+    });
+  });
+
+  test('a new workspace cannot take the name of a folder that exists, and nothing is opened', async () => {
+    await withTemp(async (dir) => {
+      const location = join(dir, 'Locations');
+      await mkdir(join(location, 'Taken'), { recursive: true });
+      const { app, page } = await launch(join(dir, 'userData'), location);
+      try {
+        await page.getByTestId('new-workspace').click();
+        const dialog = page.getByRole('dialog');
+        await dialog.getByRole('button', { name: 'Location' }).click();
+        await dialog.getByLabel('Name').fill('Taken');
+        await dialog.getByRole('button', { name: 'Create' }).click();
+        await expect(dialog.getByRole('alert')).toContainText('already exists');
+        await expect(page.getByTestId('workspace')).toHaveCount(0);
+        expect(await readdir(join(location, 'Taken'))).toEqual([]);
+        await dialog.getByRole('button', { name: 'Cancel' }).click();
+        await expect(page.getByRole('dialog')).toHaveCount(0);
+      } finally {
+        await app.close().catch(() => undefined);
+      }
     });
   });
 
@@ -91,7 +153,7 @@ test.describe('electron shell: workspace', () => {
       const folder = join(dir, 'Downloads');
       await mkdir(folder);
       await writeFile(join(folder, 'existing.txt'), 'keep me');
-      const { app, page } = await launch(join(dir, 'userData'), folder);
+      const { app, page } = await launchOpened(join(dir, 'userData'), folder);
       await expect(page.getByTestId('workspace')).toBeVisible();
       await expect(page.getByTestId('error')).toHaveCount(0);
       expect((await readdir(folder)).filter((name) => name !== '.lock').sort()).toEqual(['existing.txt', 'workspace.json']);
@@ -109,7 +171,7 @@ test.describe('electron shell: workspace', () => {
       await writeFile(source, 'hello');
 
       // The file dialog is answered with the same file twice, to see a name clash handled; the third click is cancelled.
-      const first = await launch(userData, workspace, [source, source]);
+      const first = await launchOpened(userData, workspace, [source, source]);
       try {
         await expect(first.page.getByTestId('workspace')).toBeVisible();
         await addSelectedFile(first.page);
@@ -149,7 +211,7 @@ test.describe('electron shell: workspace', () => {
       const names = ['photo.PNG', 'pic.jpeg', 'logo.svg', 'notes.txt', 'noextension'];
       const sources = names.map((name) => join(dir, 'source', name));
       for (const source of sources) await writeFile(source, 'x');
-      const { app, page } = await launch(join(dir, 'userData'), join(dir, 'ws'), sources);
+      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'), sources);
       try {
         await expect(page.getByTestId('workspace')).toBeVisible();
         for (let i = 1; i <= names.length; i += 1) {
@@ -171,7 +233,7 @@ test.describe('electron shell: workspace', () => {
       const png = join(dir, 'source', 'dot.png');
       // A 1x1 PNG.
       await writeFile(png, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
-      const { app, page } = await launch(join(dir, 'userData'), join(dir, 'ws'), [png]);
+      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'), [png]);
       try {
         await expect(page.getByTestId('workspace')).toBeVisible();
         await addSelectedFile(page);
@@ -206,7 +268,7 @@ test.describe('electron shell: workspace', () => {
   test('the plus button offers to create a text file: its name and text go into a new file in the workspace and a default node appears', async () => {
     await withTemp(async (dir) => {
       const workspace = join(dir, 'ws');
-      const { app, page } = await launch(join(dir, 'userData'), workspace);
+      const { app, page } = await launchOpened(join(dir, 'userData'), workspace);
       try {
         await expect(page.getByTestId('workspace')).toBeVisible();
         await page.getByTestId('add').click();
@@ -263,7 +325,7 @@ test.describe('electron shell: workspace', () => {
 
   test('right-clicking an empty part of the canvas opens the add popup at the pointer; "note" in it creates an information node', async () => {
     await withTemp(async (dir) => {
-      const { app, page } = await launch(join(dir, 'userData'), join(dir, 'ws'));
+      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'));
       try {
         await expect(page.getByTestId('workspace')).toBeVisible();
         await page.getByTestId('workspace').click({ button: 'right', position: { x: 300, y: 200 } });
@@ -294,7 +356,7 @@ test.describe('electron shell: workspace', () => {
 
   test('double-clicking a file node opens the file with the system; double-clicking a note opens the note dialog with its text', async () => {
     await withTemp(async (dir) => {
-      const { app, page } = await launch(join(dir, 'userData'), join(dir, 'ws'));
+      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'));
       try {
         await expect(page.getByTestId('workspace')).toBeVisible();
         // Stand in for the system's file association, so the test opens nothing.
@@ -346,7 +408,7 @@ test.describe('electron shell: workspace', () => {
 
   test('right-clicking a node opens the note dialog; the new note is linked to that node with a weight of 10', async () => {
     await withTemp(async (dir) => {
-      const { app, page } = await launch(join(dir, 'userData'), join(dir, 'ws'));
+      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'));
       try {
         await expect(page.getByTestId('workspace')).toBeVisible();
         await page.getByTestId('add').click();
@@ -380,7 +442,7 @@ test.describe('electron shell: workspace', () => {
 
   test('linked nodes line up on a horizontal or vertical axis, centred on it, and their link joins the facing connection points', async () => {
     await withTemp(async (dir) => {
-      const { app, page } = await launch(join(dir, 'userData'), join(dir, 'ws'));
+      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'));
       try {
         await expect(page.getByTestId('workspace')).toBeVisible();
         await page.getByTestId('add').click();
@@ -448,7 +510,7 @@ test.describe('electron shell: workspace', () => {
       const folder = join(dir, 'old');
       await mkdir(folder);
       await writeFile(join(folder, 'workspace.json'), JSON.stringify({ title: 'mine' }));
-      const { app, page } = await launch(join(dir, 'userData'), folder);
+      const { app, page } = await launchOpened(join(dir, 'userData'), folder);
       await expect(page.getByTestId('workspace')).toBeVisible();
       expect(JSON.parse(await readFile(join(folder, 'workspace.json'), 'utf8'))).toEqual({ title: 'mine', nodes: [] });
       await app.close();
@@ -458,11 +520,12 @@ test.describe('electron shell: workspace', () => {
   test('a second app instance cannot open a workspace that is already open, and shows nothing for it', async () => {
     await withTemp(async (dir) => {
       const workspace = join(dir, 'shared');
-      const first = await launch(join(dir, 'userData-1'), workspace);
+      const first = await launchOpened(join(dir, 'userData-1'), workspace);
       await expect(first.page.getByTestId('workspace')).toBeVisible();
 
       const second = await launch(join(dir, 'userData-2'), workspace);
-      await second.page.waitForLoadState('load');
+      await second.page.getByTestId('open-workspace').click();
+      await expect(second.page.getByTestId('error')).toContainText('in use by another instance');
       await expect(second.page.getByTestId('workspace')).toHaveCount(0);
       expect(await second.page.evaluate(async () => (await (window as unknown as { workspaceBridge: { current: () => Promise<{ open: boolean }> } }).workspaceBridge.current()).open)).toBe(false);
 
@@ -471,10 +534,34 @@ test.describe('electron shell: workspace', () => {
     });
   });
 
+  test('a workspace that cannot be opened leaves the open one open, and the open one is what is reopened after a restart', async () => {
+    await withTemp(async (dir) => {
+      const shared = join(dir, 'shared');
+      const mine = join(dir, 'mine');
+      const userData = join(dir, 'userData-2');
+      const holder = await launchOpened(join(dir, 'userData-1'), shared);
+
+      type Bridge = { workspaceBridge: { current: () => Promise<{ open: boolean; name?: string }> } };
+      const second = await launch(userData, [mine, shared].join(delimiter));
+      await second.page.getByTestId('open-workspace').click();
+      await expect(second.page.getByTestId('workspace')).toBeVisible();
+      await second.page.getByTestId('open-workspace').click(); // the folder held by the first instance
+      await expect(second.page.getByTestId('error')).toContainText('in use by another instance');
+      expect(await second.page.evaluate(async () => (await (window as unknown as Bridge).workspaceBridge.current()))).toMatchObject({ open: true, name: 'mine' });
+      await second.app.close();
+
+      const third = await launch(userData, join(dir, 'never-picked'));
+      await expect(third.page.getByTestId('workspace')).toBeVisible();
+      expect(await third.page.evaluate(async () => (await (window as unknown as Bridge).workspaceBridge.current()).name)).toBe('mine');
+      await third.app.close();
+      await holder.app.close();
+    });
+  });
+
   test('the app makes no network request: everything it loads comes from the app itself', async () => {
     await withTemp(async (dir) => {
       const { app, page, requests } = await launch(join(dir, 'userData'));
-      await expect(page.getByTestId('workspace')).toBeVisible();
+      await expect(page.getByTestId('toolbar')).toBeVisible();
       expect(requests.length).toBeGreaterThan(0);
       for (const url of requests) expect(url, url).toMatch(/^(app|data|blob):/);
       await app.close();
@@ -497,8 +584,8 @@ test.describe('electron shell: security', () => {
         protocol: location.protocol,
       }));
       expect(exposed).toMatchObject({ require: 'undefined', process: 'undefined', buffer: 'undefined', electron: 'undefined', isolated: true, protocol: 'app:' });
-      expect(exposed.workspaceBridge).toEqual(['addFile', 'createInformation', 'createInformationLinked', 'createLink', 'createText', 'current', 'open', 'openNode', 'readNode', 'setLinkWeight', 'updateInformation']);
-      expect(exposed.groups).toEqual(['app', 'credentials', 'net', 'sidecar']);
+      expect(exposed.workspaceBridge).toEqual(['addFile', 'createInformation', 'createInformationLinked', 'createLink', 'createText', 'current', 'openNode', 'readNode', 'setLinkWeight', 'updateInformation']);
+      expect(exposed.groups).toEqual(['app', 'credentials', 'data', 'net', 'sidecar', 'workspace']);
       await app.close();
     });
   });
@@ -539,7 +626,7 @@ test.describe('electron shell: security', () => {
   test('bad requests over the bridge come back as coded errors, and the bridge cannot reach an unknown channel', async () => {
     await withTemp(async (dir) => {
       const { app, page } = await launch(join(dir, 'userData'));
-      await expect(page.getByTestId('workspace')).toBeVisible();
+      await expect(page.getByTestId('toolbar')).toBeVisible();
       const results = await page.evaluate(async () => {
         const bridge = (window as unknown as { abBridge: Record<string, Record<string, (input?: unknown) => Promise<{ ok: boolean; error?: { code: string } }>>> }).abBridge;
         return {
