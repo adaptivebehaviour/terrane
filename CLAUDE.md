@@ -1,9 +1,7 @@
 # Terrane
 
-Desktop (Electron) application scaffolded from manifesto release 2.4.0. Collections are composed in
-`src/renderer/registry.ts` (`createRegistry([...])`); the project's own collection is `collection/` (`terrane-collection`).
+Scaffolded from manifesto's `electron` type. The collections are composed in `src/renderer/registry.ts`; the project's own
+collection is `collection/` (`terrane-collection`).
 
-The framework is vendored from manifesto release 2.4.0 in `vendor/`: **change manifesto and take a new release, never edit
-`vendor/`**; upgrade with `update-project`.
-
-The starter screen is deliberately blank: add content, controls and routes only when asked.
+The framework is vendored from manifesto release 2.5.0 in `vendor/`: **change manifesto and take a new release, never
+edit `vendor/`**; upgrade with `update-project`.

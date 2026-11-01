@@ -1,0 +1,4 @@
+- [ ] Update the application with the most recent updates to Manifesto.
+- [ ] Expand on the nodes and their displays to include fields like "title", "description", "body" etc. Size the node displays based on the information selected when creating the node - which should be done with an extended dialog. Customise this through the handlers. See the email for more on this.
+- [ ] Implement a "papers" collection and make it so that the PDF file nodes consist only of the data - point to the location of the file in the data but don't make a big deal out of it if it isn't there.
+- [ ] Create a left-hand panel that lists all the nodes regardless of whether or not they are connected i.e. papers.
