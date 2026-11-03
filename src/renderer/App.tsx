@@ -4,11 +4,9 @@ import { AddDialog } from './AddDialog';
 import { AddMenu } from './AddMenu';
 import { Canvas } from './Canvas';
 import { isInformationNode } from './handlers';
-import folderOpenIcon from './icons/folder-open.svg';
-import folderPlusIcon from './icons/folder-plus.svg';
-import plusIcon from './icons/plus.svg';
 import { NewWorkspaceDialog } from './NewWorkspaceDialog';
 import { CreateNoteDialog, UpdateNoteDialog } from './NoteDialogs';
+import { Toolbar } from './Toolbar';
 
 /**
  * A toolbar (new workspace, open workspace, plus) above the canvas, which shows the network. Workspaces are created and opened
@@ -86,11 +84,7 @@ export function App() {
 
   return (
     <div className="flex h-screen flex-col">
-      <nav className="flex items-center gap-1 border-b border-slate-200 p-1" data-testid="toolbar">
-        <ToolbarButton label="New workspace" icon={folderPlusIcon} testId="new-workspace" onClick={() => void newWorkspace()} />
-        <ToolbarButton label="Open workspace" icon={folderOpenIcon} testId="open-workspace" onClick={() => void openWorkspace()} />
-        <ToolbarButton label="Add" icon={plusIcon} testId="add" onClick={openMenuAtButton} />
-      </nav>
+      <Toolbar onNewWorkspace={() => void newWorkspace()} onOpenWorkspace={() => void openWorkspace()} onAdd={openMenuAtButton} />
       {menu && (
         <AddMenu
           x={menu.x}
@@ -145,13 +139,5 @@ export function App() {
         />
       )}
     </div>
-  );
-}
-
-function ToolbarButton({ label, icon, testId, onClick }: { label: string; icon: string; testId: string; onClick?: () => void }) {
-  return (
-    <button type="button" title={label} aria-label={label} data-testid={testId} onClick={onClick} className="rounded p-1.5 hover:bg-slate-100">
-      <img src={icon} alt="" className="h-5 w-5" />
-    </button>
   );
 }
