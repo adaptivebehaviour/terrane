@@ -40,5 +40,8 @@
     "tests/app.e2e.ts",
     "tests/packaged.e2e.ts",
     "tsconfig.json"
+  ],
+  "absent": [
+    "src/main/data.ts"
   ]
 }
