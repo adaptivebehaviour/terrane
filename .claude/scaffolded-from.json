@@ -1,9 +1,9 @@
 {
   "mode": "packages",
-  "release": "2.5.0",
+  "release": "2.6.1",
   "source": "electron",
   "project_type": "single",
-  "scaffold_release": "2.5.0",
+  "scaffold_release": "2.6.1",
   "files": [
     ".gitattributes",
     ".gitignore",
