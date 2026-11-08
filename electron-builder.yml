@@ -24,7 +24,7 @@ electronFuses:
 win:
   target:
     - nsis
-  # v1 builds are unsigned and for internal use (decision D5). Signing needs a certificate; when there is one, remove this line.
+  # Builds are unsigned and for internal use. Signing needs a certificate; when there is one, remove this line.
   signAndEditExecutable: false
 nsis:
   oneClick: false
@@ -33,5 +33,5 @@ nsis:
   allowToChangeInstallationDirectory: true
   # Uninstalling never touches workspaces (they live in folders the user chose) nor the app's settings.
   deleteAppDataOnUninstall: false
-# No auto-update feed in v1 (decision D5): without this, electron-builder tries to detect a publish provider and fails.
+# No auto-update feed: without this, electron-builder tries to detect a publish provider and fails.
 publish: null

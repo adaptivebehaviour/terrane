@@ -1,7 +1,8 @@
 {
   "name": "terrane",
-  "version": "1.0.0",
+  "version": "0.0.0",
   "description": "terrane Electron desktop application",
+  "license": "UNLICENSED",
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {
@@ -14,12 +15,12 @@
     "dist": "electron-vite build && electron-builder"
   },
   "dependencies": {
-    "@adaptivebehaviour/data": "file:vendor/adaptivebehaviour-data-2.6.1.tgz",
-    "@adaptivebehaviour/desktop": "file:vendor/adaptivebehaviour-desktop-2.6.1.tgz",
-    "@adaptivebehaviour/manifesto": "file:vendor/adaptivebehaviour-manifesto-2.6.1.tgz",
-    "@adaptivebehaviour/scenes": "file:vendor/adaptivebehaviour-scenes-2.6.1.tgz",
-    "@adaptivebehaviour/scenes-records": "file:vendor/adaptivebehaviour-scenes-records-2.6.1.tgz",
-    "@adaptivebehaviour/ui": "file:vendor/adaptivebehaviour-ui-2.6.1.tgz",
+    "@adaptivebehaviour/data": "file:vendor/adaptivebehaviour-data-2.7.0.tgz",
+    "@adaptivebehaviour/desktop": "file:vendor/adaptivebehaviour-desktop-2.7.0.tgz",
+    "@adaptivebehaviour/manifesto": "file:vendor/adaptivebehaviour-manifesto-2.7.0.tgz",
+    "@adaptivebehaviour/scenes": "file:vendor/adaptivebehaviour-scenes-2.7.0.tgz",
+    "@adaptivebehaviour/scenes-records": "file:vendor/adaptivebehaviour-scenes-records-2.7.0.tgz",
+    "@adaptivebehaviour/ui": "file:vendor/adaptivebehaviour-ui-2.7.0.tgz",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "terrane-collection": "*"

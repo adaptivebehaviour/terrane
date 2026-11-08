@@ -10,6 +10,9 @@ export const APP_ID = 'terrane';
 /** Shown in the window title and written into new workspaces as `createdBy`. */
 export const APP_NAME = 'Terrane';
 
+/** This application: it decides which data destinations may be selected and which one is the default. */
+export const APPLICATION = 'electron';
+
 /**
  * The external services this application may use: its network allow-list. Empty by default, so the application makes
  * no network requests and its CSP allows no remote origin. Declare a service here to use it, e.g. Sanity or an LLM API

@@ -1,14 +1,13 @@
 {
   "mode": "packages",
-  "release": "2.6.1",
+  "release": "2.7.0",
   "source": "electron",
   "project_type": "single",
-  "scaffold_release": "2.6.1",
+  "scaffold_release": "2.7.0",
   "files": [
     ".gitattributes",
     ".gitignore",
     ".vscode/launch.json",
-    ".vscode/tasks.json",
     "CLAUDE.md",
     "collection/package.json",
     "collection/src/apiBase.ts",
