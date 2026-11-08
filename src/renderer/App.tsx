@@ -1,23 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ab } from './ab';
-import { AddDialog } from './AddDialog';
-import { AddMenu } from './AddMenu';
 import { Canvas } from './Canvas';
-import { isInformationNode } from './handlers';
 import { NewWorkspaceDialog } from './NewWorkspaceDialog';
-import { CreateNoteDialog, UpdateNoteDialog } from './NoteDialogs';
+import { NodeDialog } from './NodeDialog';
 import { Toolbar } from './Toolbar';
 
 /**
- * A toolbar (new workspace, open workspace, plus) above the canvas, which shows the network. Workspaces are created and opened
+ * A toolbar (new workspace, open workspace, add) above the canvas, which shows the network. Workspaces are created and opened
  * the framework's way (`ab.workspace`); the main process reopens the last one at startup.
  */
 export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>();
   const [error, setError] = useState<string>();
-  const [menu, setMenu] = useState<{ x: number; y: number }>();
-  /** The dialog being shown: a new `.txt` file, a new note (linked to a node, if `linkTo` is given), or an existing note's update. */
-  const [dialog, setDialog] = useState<{ kind: 'text' } | { kind: 'note'; linkTo?: string } | { kind: 'update'; nodeId: string; text: string }>();
+  /** The node dialog being shown: for a new node, or for editing `node`. */
+  const [dialog, setDialog] = useState<{ kind: 'create' } | { kind: 'edit'; node: NodeRecord }>();
   /** The location the "new workspace" dialog starts with; `null` while the dialog is closed. */
   const [newWorkspaceLocation, setNewWorkspaceLocation] = useState<string | null>(null);
 
@@ -46,25 +42,17 @@ export function App() {
     if (result.status === 'failed') setError(result.message);
   };
 
-  const add = async (action: () => Promise<WorkspaceResult>) => {
-    setMenu(undefined);
+  /** Closes the node dialog and runs the change it asked for. */
+  const submit = async (action: () => Promise<WorkspaceResult>) => {
     setDialog(undefined);
     await change(action);
   };
-
-  const closeMenu = useCallback(() => setMenu(undefined), []);
-
-  /** Opens the add popup with its top left corner just under the Add button. */
-  const openMenuAtButton = useCallback(() => {
-    const box = document.querySelector('[data-testid=add]')?.getBoundingClientRect();
-    setMenu({ x: box?.left ?? 0, y: box?.bottom ?? 0 });
-  }, []);
 
   useEffect(() => {
     void showWorkspace();
   }, [showWorkspace]);
 
-  // Hotkeys for the toolbar buttons: Ctrl+O opens a workspace, Ctrl+N adds. Like the buttons, they do nothing while a
+  // Hotkeys for the toolbar buttons: Ctrl+O opens a workspace, Ctrl+N opens the node dialog. Like the buttons, they do nothing while a
   // dialog is open. (Electron's default menu, which Terrane keeps, uses neither.)
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -75,41 +63,19 @@ export function App() {
         void openWorkspace();
       } else if (key === 'n') {
         event.preventDefault();
-        openMenuAtButton();
+        setDialog({ kind: 'create' });
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [openWorkspace, openMenuAtButton]);
+  }, [openWorkspace]);
 
   return (
     <div className="flex h-screen flex-col">
-      <Toolbar onNewWorkspace={() => void newWorkspace()} onOpenWorkspace={() => void openWorkspace()} onAdd={openMenuAtButton} />
-      {menu && (
-        <AddMenu
-          x={menu.x}
-          y={menu.y}
-          onCreateText={() => {
-            setMenu(undefined);
-            setDialog({ kind: 'text' });
-          }}
-          onCreateInformation={() => {
-            setMenu(undefined);
-            setDialog({ kind: 'note' });
-          }}
-          onImport={() => void add(() => window.workspaceBridge.addFile())}
-          onClose={closeMenu}
-        />
-      )}
-      {dialog?.kind === 'text' && <AddDialog onCreateText={(name, text) => void add(() => window.workspaceBridge.createText(name, text))} onCancel={() => setDialog(undefined)} />}
-      {dialog?.kind === 'note' && (
-        <CreateNoteDialog
-          onCreate={(text) => void add(() => (dialog.linkTo ? window.workspaceBridge.createInformationLinked(text, dialog.linkTo) : window.workspaceBridge.createInformation(text)))}
-          onCancel={() => setDialog(undefined)}
-        />
-      )}
-      {dialog?.kind === 'update' && (
-        <UpdateNoteDialog text={dialog.text} onUpdate={(text) => void add(() => window.workspaceBridge.updateInformation(dialog.nodeId, text))} onCancel={() => setDialog(undefined)} />
+      <Toolbar onNewWorkspace={() => void newWorkspace()} onOpenWorkspace={() => void openWorkspace()} onAdd={() => setDialog({ kind: 'create' })} />
+      {dialog?.kind === 'create' && <NodeDialog onSubmit={(input) => void submit(() => window.workspaceBridge.createNode(input))} onCancel={() => setDialog(undefined)} />}
+      {dialog?.kind === 'edit' && (
+        <NodeDialog node={dialog.node} onSubmit={(input) => void submit(() => window.workspaceBridge.updateNode(dialog.node.id, input))} onCancel={() => setDialog(undefined)} />
       )}
       {newWorkspaceLocation !== null && (
         <NewWorkspaceDialog
@@ -130,12 +96,7 @@ export function App() {
           links={workspace.links}
           onCreateLink={(source, target) => void change(() => window.workspaceBridge.createLink(source, target))}
           onSetWeight={(link, weight) => void change(() => window.workspaceBridge.setLinkWeight(link, weight))}
-          onEmptyContextMenu={(x, y) => setMenu({ x, y })}
-          onNodeContextMenu={(nodeId) => {
-            setMenu(undefined);
-            setDialog({ kind: 'note', linkTo: nodeId });
-          }}
-          onOpenNode={(node) => (isInformationNode(node) ? setDialog({ kind: 'update', nodeId: node.id, text: node.items[0] }) : void change(() => window.workspaceBridge.openNode(node.id)))}
+          onOpenNode={(node) => setDialog({ kind: 'edit', node })}
         />
       )}
     </div>

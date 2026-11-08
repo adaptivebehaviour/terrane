@@ -43,10 +43,6 @@ interface CanvasProps {
   links: WorkspaceLink[];
   onCreateLink: (source: string, target: string) => void;
   onSetWeight: (link: string, weight: number) => void;
-  /** The user right-clicked an empty part of the canvas, at (`x`, `y`) in pixels from the window's top left. */
-  onEmptyContextMenu: (x: number, y: number) => void;
-  /** The user right-clicked a node's display. */
-  onNodeContextMenu: (nodeId: string) => void;
   /** The user double-clicked a node's display. */
   onOpenNode: (node: NodeRecord) => void;
 }
@@ -62,7 +58,7 @@ interface CanvasProps {
  * that point to the pointer, and releasing over another node's display creates a link from the first node (the
  * source) to the other (the target).
  */
-export function Canvas({ nodes, links, onCreateLink, onSetWeight, onEmptyContextMenu, onNodeContextMenu, onOpenNode }: CanvasProps) {
+export function Canvas({ nodes, links, onCreateLink, onSetWeight, onOpenNode }: CanvasProps) {
   const elements = useRef(new Map<string, HTMLDivElement>());
   const [sizes, setSizes] = useState(new Map<string, Size>());
   const [layout, setLayout] = useState<Layout>();
@@ -160,15 +156,6 @@ export function Canvas({ nodes, links, onCreateLink, onSetWeight, onEmptyContext
       // A click on the background (the canvas itself or its content area, not a display or the dialog) deselects.
       onClick={(event) => {
         if (event.target === canvas.current || event.target === content.current) setSelected(undefined);
-      }}
-      onContextMenu={(event) => {
-        const target = event.target as Element;
-        // On a node's display: the node. Otherwise only an empty part counts, not a link (its wide invisible path takes the clicks).
-        const nodeId = target.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId;
-        if (nodeId === undefined && target.closest('[data-link-id]')) return;
-        event.preventDefault();
-        if (nodeId !== undefined) return onNodeContextMenu(nodeId);
-        onEmptyContextMenu(event.clientX, event.clientY);
       }}
     >
       {/* m-auto centres the content when it is smaller than the canvas, without cutting off its top or left when it is larger. */}

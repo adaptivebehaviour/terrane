@@ -39,10 +39,35 @@ async function launchOpened(userData: string, workspace: string, files: string[]
   return launched;
 }
 
-/** The plus button, then "Import" (the native file dialog is answered by AB_E2E_PICK_FILE). */
-async function addSelectedFile(page: Page): Promise<void> {
+interface NodeFields {
+  title?: string;
+  description?: string;
+  body?: string;
+  /** The fields to tick (of those with text); the others are unticked. Absent: the dialog's own ticks. */
+  show?: ('title' | 'description' | 'body')[];
+  /** Click "File" (the native file dialog is answered by AB_E2E_PICK_FILE). */
+  file?: boolean;
+  copy?: boolean;
+}
+
+/** The Add button, then the node dialog filled in with `fields`, then "Create". */
+async function createNode(page: Page, fields: NodeFields): Promise<void> {
   await page.getByTestId('add').click();
-  await page.getByTestId('choose-file').click();
+  const dialog = page.getByTestId('node-dialog');
+  for (const field of ['title', 'description', 'body'] as const) if (fields[field] !== undefined) await dialog.getByTestId(`node-${field}`).fill(fields[field]!);
+  if (fields.file) {
+    await dialog.getByTestId('node-file').click();
+    await expect(dialog.getByTestId('node-path')).toBeVisible();
+  }
+  if (fields.copy !== undefined) await dialog.getByTestId('node-copy').setChecked(fields.copy);
+  if (fields.show) {
+    for (const field of ['title', 'description', 'body'] as const) {
+      const box = dialog.getByTestId(`show-${field}`);
+      if (await box.isEnabled()) await box.setChecked(fields.show.includes(field));
+    }
+  }
+  await dialog.getByTestId('node-submit').click();
+  await expect(dialog).toHaveCount(0);
 }
 
 async function withTemp<T>(body: (dir: string) => Promise<T>): Promise<T> {
@@ -162,45 +187,136 @@ test.describe('electron shell: workspace', () => {
     });
   });
 
-  test('the plus button copies a chosen file into the workspace, shows it as a 100x100 white square and records it in workspace.json', async () => {
+  test('Add opens the node dialog: Title ticked by default, a checkbox disabled while its field is empty, Create disabled until a ticked field has text', async () => {
+    await withTemp(async (dir) => {
+      const workspace = join(dir, 'ws');
+      const { app, page } = await launchOpened(join(dir, 'userData'), workspace);
+      try {
+        await page.getByTestId('add').click();
+        const dialog = page.getByTestId('node-dialog');
+        await expect(dialog).toBeVisible();
+        expect(await Promise.all(['title', 'description', 'body'].map((field) => dialog.getByTestId(`node-${field}`).getAttribute('rows')))).toEqual(['1', '2', '10']);
+        await expect(dialog.getByTestId('show-title')).toBeChecked();
+        await expect(dialog.getByTestId('show-title')).toBeDisabled(); // ticked, but its field is empty
+        await expect(dialog.getByTestId('show-description')).not.toBeChecked();
+        await expect(dialog.getByTestId('show-description')).toBeDisabled();
+        await expect(dialog.getByTestId('show-body')).not.toBeChecked();
+        await expect(dialog.getByTestId('show-body')).toBeDisabled();
+        await expect(dialog.getByTestId('node-copy')).not.toBeChecked();
+        await expect(dialog.getByTestId('node-path')).toHaveCount(0);
+        await expect(dialog.getByTestId('node-submit')).toHaveText('Create');
+        await expect(dialog.getByTestId('node-submit')).toBeDisabled();
+
+        // Text in an unticked field is not enough; ticking it is.
+        await dialog.getByTestId('node-body').fill('just a body');
+        await expect(dialog.getByTestId('show-body')).toBeEnabled();
+        await expect(dialog.getByTestId('node-submit')).toBeDisabled();
+        await dialog.getByTestId('show-body').check();
+        await expect(dialog.getByTestId('node-submit')).toBeEnabled();
+        await dialog.getByTestId('node-submit').click();
+        await expect(dialog).toHaveCount(0);
+
+        const node = page.getByTestId('node');
+        await expect(node).toHaveText('just a body');
+        await expect(node).toHaveAttribute('data-handler', 'text');
+        const box = await node.boundingBox();
+        expect([Math.round(box!.width), Math.round(box!.height)]).toEqual([100, 100]);
+        const info = JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8'));
+        expect(info.appId).toBe('terrane'); // the rest of workspace.json is kept
+        expect(info.nodes).toEqual([{ id: expect.any(String), addedAt: expect.any(String), title: null, description: null, body: 'just a body', display: ['body'] }]);
+
+        // Ctrl+N opens the same dialog; cancelling it creates nothing.
+        await page.keyboard.press('Control+n');
+        await expect(dialog).toBeVisible();
+        await expect(dialog.getByTestId('node-submit')).toHaveText('Create');
+        await dialog.getByTestId('node-title').fill('never');
+        await page.keyboard.press('Escape');
+        await expect(dialog).toHaveCount(0);
+        await expect(node).toHaveCount(1);
+
+        // Right-clicking the canvas or a node does nothing.
+        await page.getByTestId('workspace').click({ button: 'right', position: { x: 10, y: 10 } });
+        await node.click({ button: 'right' });
+        await expect(page.locator('dialog[open], [role=menu]')).toHaveCount(0);
+      } finally {
+        await app.close().catch(() => undefined);
+      }
+    });
+  });
+
+  test('a node shows its ticked fields in the order title, description, body, each on its own line and without labels; a long body is cut at 127 characters', async () => {
+    await withTemp(async (dir) => {
+      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'));
+      try {
+        await createNode(page, { title: 'T', description: 'D', body: 'b'.repeat(200), show: ['title', 'description', 'body'] });
+        await createNode(page, { title: 'T2', description: 'D2', body: 'short', show: ['title', 'body'] });
+        await createNode(page, { title: 'T3', description: 'D3', body: 'short', show: ['description', 'body'] });
+        await createNode(page, { title: 'T4', description: 'D4', body: 'short', show: ['title'] });
+        const lines = (index: number) => page.getByTestId('node').nth(index).getByTestId('node-line');
+        await expect(lines(0)).toHaveText(['T', 'D', `${'b'.repeat(127)}…`]);
+        await expect(lines(1)).toHaveText(['T2', 'short']);
+        await expect(lines(2)).toHaveText(['D3', 'short']);
+        await expect(lines(3)).toHaveText(['T4']);
+        await expect(page.getByTestId('workspace')).not.toContainText('Title');
+        // Each line is below the one before it.
+        const tops = await lines(0).evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().top));
+        expect(tops[1]).toBeGreaterThan(tops[0]);
+        expect(tops[2]).toBeGreaterThan(tops[1]);
+      } finally {
+        await app.close().catch(() => undefined);
+      }
+    });
+  });
+
+  test('a file chosen in the node dialog is left where it is unless copying is ticked; its name fills an empty title', async () => {
     await withTemp(async (dir) => {
       const userData = join(dir, 'userData');
-      const workspace = join(dir, 'My Workspace');
+      const workspace = join(dir, 'ws');
       await mkdir(join(dir, 'source'));
       const source = join(dir, 'source', 'report.txt');
       await writeFile(source, 'hello');
 
-      // The file dialog is answered with the same file twice, to see a name clash handled; the third click is cancelled.
-      const first = await launchOpened(userData, workspace, [source, source]);
+      // The file dialog is answered with the same file three times, then cancelled.
+      const first = await launchOpened(userData, workspace, [source, source, source, '']);
+      const { page } = first;
       try {
-        await expect(first.page.getByTestId('workspace')).toBeVisible();
-        await addSelectedFile(first.page);
-        const node = first.page.getByTestId('node');
-        await expect(node).toHaveCount(1);
-        await expect(node).toHaveText('report.txt');
-        const box = await node.boundingBox();
-        expect([Math.round(box!.width), Math.round(box!.height)]).toEqual([100, 100]);
-        expect(await node.evaluate((element) => ({ background: getComputedStyle(element).backgroundColor, align: getComputedStyle(element).textAlign }))).toEqual({ background: 'rgb(255, 255, 255)', align: 'center' });
+        // Not copied (the default): the path is the original's, and the file's name becomes the empty title.
+        await page.getByTestId('add').click();
+        const dialog = page.getByTestId('node-dialog');
+        await dialog.getByTestId('node-file').click();
+        await expect(dialog.getByTestId('node-path')).toHaveText(source);
+        await expect(dialog.getByTestId('node-title')).toHaveValue('report.txt');
+        await dialog.getByTestId('node-submit').click();
+        await expect(page.getByTestId('node')).toHaveText('report.txt');
+        await expect(page.getByTestId('node')).toHaveAttribute('data-handler', 'default');
 
-        await addSelectedFile(first.page);
-        await expect(node).toHaveCount(2);
-        await expect(node.nth(1)).toHaveText('report (1).txt');
-        await addSelectedFile(first.page); // cancelled: nothing changes
-        await expect(node).toHaveCount(2);
+        // A title already typed is kept; copied into the workspace, a clashing name is numbered.
+        await createNode(page, { title: 'mine', file: true, copy: true });
+        await createNode(page, { file: true, copy: true });
+        await expect(page.getByTestId('node')).toHaveText(['report.txt', 'mine', 'report.txt']);
+
+        // A cancelled file dialog chooses nothing.
+        await page.getByTestId('add').click();
+        await dialog.getByTestId('node-file').click();
+        await expect(dialog.getByTestId('node-path')).toHaveCount(0);
+        await page.keyboard.press('Escape');
 
         expect(await readFile(source, 'utf8')).toBe('hello'); // the original is untouched
         expect((await readdir(workspace)).sort()).toEqual(['.lock', 'report (1).txt', 'report.txt', 'workspace.json']);
-        expect(await readFile(join(workspace, 'report.txt'), 'utf8')).toBe('hello');
         const info = JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8'));
-        expect(info.appId).toBe('terrane'); // the rest of workspace.json is kept
-        expect(info.nodes).toMatchObject([{ filename: 'report.txt', size: 5 }, { filename: 'report (1).txt', size: 5 }]);
+        expect(info.nodes).toMatchObject([
+          { title: 'report.txt', display: ['title'], filename: 'report.txt', path: source },
+          { title: 'mine', filename: 'report.txt', path: 'report.txt' },
+          { title: 'report.txt', filename: 'report (1).txt', path: 'report (1).txt' },
+        ]);
+        expect(info.nodes.some((node: object) => 'size' in node)).toBe(false);
       } finally {
         await first.app.close().catch(() => undefined);
       }
 
-      // The squares come back when the workspace is reopened.
+      // The nodes come back when the workspace is reopened.
       const second = await launch(userData, join(dir, 'never-picked'));
-      await expect(second.page.getByTestId('node')).toHaveText(['report.txt', 'report (1).txt']);
+      await expect(second.page.getByTestId('node')).toHaveText(['report.txt', 'mine', 'report.txt']);
       await second.app.close();
     });
   });
@@ -213,9 +329,8 @@ test.describe('electron shell: workspace', () => {
       for (const source of sources) await writeFile(source, 'x');
       const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'), sources);
       try {
-        await expect(page.getByTestId('workspace')).toBeVisible();
         for (let i = 1; i <= names.length; i += 1) {
-          await addSelectedFile(page);
+          await createNode(page, { file: true });
           await expect(page.getByTestId('node')).toHaveCount(i);
         }
         await expect(page.getByTestId('node')).toHaveText(names);
@@ -227,7 +342,7 @@ test.describe('electron shell: workspace', () => {
     });
   });
 
-  test('the image display is portrait: the image in a square above, the name in the bottom 20%, aspect ratio kept', async () => {
+  test('the image display is portrait (the image in a square above, the text in the bottom 20%), and shows no image while the body is shown', async () => {
     await withTemp(async (dir) => {
       await mkdir(join(dir, 'source'));
       const png = join(dir, 'source', 'dot.png');
@@ -235,8 +350,7 @@ test.describe('electron shell: workspace', () => {
       await writeFile(png, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
       const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'), [png]);
       try {
-        await expect(page.getByTestId('workspace')).toBeVisible();
-        await addSelectedFile(page);
+        await createNode(page, { file: true, copy: true });
         const node = page.getByTestId('node');
         await expect(node).toHaveAttribute('data-handler', 'image');
         const image = node.locator('img');
@@ -248,192 +362,144 @@ test.describe('electron shell: workspace', () => {
         };
         const whole = await box(node);
         const top = await box(node.getByTestId('node-image'));
-        const bottom = await box(node.getByTestId('node-name'));
+        const bottom = await box(node.getByTestId('node-text'));
         expect(whole.height).toBeGreaterThan(whole.width); // portrait
         expect(top).toMatchObject({ x: whole.x, y: whole.y, width: top.height }); // a square at the top
-        expect(bottom.height).toBe(Math.round(whole.height * 0.2)); // the name takes 20% of the height
+        expect(bottom.height).toBe(Math.round(whole.height * 0.2)); // the text takes 20% of the height
         expect(top.height + bottom.height).toBe(whole.height);
         expect(bottom.y).toBe(top.y + top.height);
-        await expect(node.getByTestId('node-name')).toHaveText('dot.png');
+        await expect(node.getByTestId('node-text')).toHaveText('dot.png');
         expect(await image.evaluate((element) => getComputedStyle(element).objectFit)).toBe('contain'); // aspect ratio kept
         const shown = await box(image);
         expect(shown.width).toBeLessThanOrEqual(top.width);
         expect(shown.height).toBeLessThanOrEqual(top.height);
+
+        // With the body shown, there is no image: a 100x100 square with the lines.
+        await node.dblclick();
+        await page.getByTestId('node-body').fill('a body');
+        await page.getByTestId('show-body').check();
+        await page.getByTestId('node-submit').click();
+        await expect(node.getByTestId('node-line')).toHaveText(['dot.png', 'a body']);
+        await expect(node.locator('img')).toHaveCount(0);
+        expect(await box(node)).toMatchObject({ width: 100, height: 100 });
       } finally {
         await app.close().catch(() => undefined);
       }
     });
   });
 
-  test('the plus button offers to create a text file: its name and text go into a new file in the workspace and a default node appears', async () => {
+  test('double-clicking a node opens the dialog filled in, with Save; saving replaces the node, cancelling changes nothing', async () => {
     await withTemp(async (dir) => {
       const workspace = join(dir, 'ws');
-      const { app, page } = await launchOpened(join(dir, 'userData'), workspace);
+      await mkdir(join(dir, 'source'));
+      const source = join(dir, 'source', 'later.txt');
+      await writeFile(source, 'x');
+      const { app, page } = await launchOpened(join(dir, 'userData'), workspace, [source]);
       try {
-        await expect(page.getByTestId('workspace')).toBeVisible();
-        await page.getByTestId('add').click();
-        await expect(page.getByTestId('choose-create')).toBeVisible();
-        await expect(page.getByTestId('choose-file')).toBeVisible();
-        await expect(page.getByTestId('choose-text')).toHaveCount(0); // the submenu opens on hover
-        await page.getByTestId('choose-create').hover();
-        await expect(page.getByTestId('choose-text')).toHaveText('.txt');
-        await expect(page.getByTestId('choose-information')).toHaveText('note');
-        await page.getByTestId('choose-text').click();
-        await expect(page.getByTestId('text-create')).toBeDisabled(); // a filename is required
-        await page.getByTestId('text-name').fill('shopping');
-        await page.getByTestId('text-body').fill('milk\neggs');
-        await page.getByTestId('text-create').click();
-
+        await createNode(page, { title: 'remember', body: 'the milk' });
+        const before = JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8')).nodes[0];
         const node = page.getByTestId('node');
+
+        await node.dblclick();
+        const dialog = page.getByTestId('node-dialog');
+        await expect(dialog.getByTestId('node-title')).toHaveValue('remember');
+        await expect(dialog.getByTestId('node-body')).toHaveValue('the milk');
+        await expect(dialog.getByTestId('show-title')).toBeChecked();
+        await expect(dialog.getByTestId('show-body')).not.toBeChecked();
+        await expect(dialog.getByTestId('node-submit')).toHaveText('Save');
+        await dialog.getByTestId('node-title').fill('changed');
+        await page.keyboard.press('Escape');
+        await expect(dialog).toHaveCount(0);
+        await expect(node).toHaveText('remember');
+
+        // Everything can be changed, including giving the node a file.
+        await node.dblclick();
+        await dialog.getByTestId('node-title').fill('');
+        await dialog.getByTestId('node-description').fill('described');
+        await dialog.getByTestId('show-description').check();
+        await dialog.getByTestId('show-body').check();
+        await dialog.getByTestId('node-file').click();
+        await expect(dialog.getByTestId('node-title')).toHaveValue('later.txt'); // the emptied title takes the file's name
+        await dialog.getByTestId('node-submit').click();
+        await expect(dialog).toHaveCount(0);
         await expect(node).toHaveCount(1);
-        await expect(node).toHaveText('shopping.txt');
-        await expect(node).toHaveAttribute('data-handler', 'default'); // looks like any default node
-        await expect(page.getByTestId('add-dialog')).toHaveCount(0);
-        expect(await readFile(join(workspace, 'shopping.txt'), 'utf8')).toBe('milk\neggs');
-        const info = JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8'));
-        expect(info.nodes).toMatchObject([{ filename: 'shopping.txt', size: 9 }]);
-
-        // The same name again does not overwrite; an invalid name is refused and nothing is created.
-        await page.getByTestId('add').click();
-        await page.getByTestId('choose-create').hover();
-        await page.getByTestId('choose-text').click();
-        await page.getByTestId('text-name').fill('shopping.txt');
-        await page.getByTestId('text-create').click();
-        await expect(node).toHaveText(['shopping.txt', 'shopping (1).txt']);
-        await page.getByTestId('add').click();
-        await page.getByTestId('choose-create').hover();
-        await page.getByTestId('choose-text').click();
-        await page.getByTestId('text-name').fill('a/b');
-        await page.getByTestId('text-create').click();
-        await expect(page.getByTestId('error')).toBeVisible();
-        await expect(node).toHaveCount(2);
-
-        // Cancelling creates nothing.
-        await page.getByTestId('add').click();
-        await page.getByTestId('choose-create').hover();
-        await page.getByTestId('choose-text').click();
-        await page.getByTestId('text-name').fill('never');
-        await page.keyboard.press('Escape');
-        await expect(page.getByTestId('add-dialog')).toHaveCount(0);
-        await expect(node).toHaveCount(2);
-        expect((await readdir(workspace)).sort()).toEqual(['.lock', 'shopping (1).txt', 'shopping.txt', 'workspace.json']);
+        await expect(node.getByTestId('node-line')).toHaveText(['later.txt', 'described', 'the milk']);
+        await expect(node).toHaveAttribute('data-handler', 'default');
+        const after = JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8')).nodes;
+        expect(after).toEqual([
+          { id: before.id, addedAt: before.addedAt, title: 'later.txt', description: 'described', body: 'the milk', display: ['title', 'description', 'body'], filename: 'later.txt', path: source },
+        ]);
       } finally {
         await app.close().catch(() => undefined);
       }
     });
   });
 
-  test('right-clicking an empty part of the canvas opens the add popup at the pointer; "note" in it creates an information node', async () => {
+  test('editing a node whose file was copied in: copying stays ticked and disabled until another file is chosen, and saving then asks whether to keep the old copy', async () => {
     await withTemp(async (dir) => {
-      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'));
+      const workspace = join(dir, 'ws');
+      await mkdir(join(dir, 'source'));
+      const [a, b, c] = ['a.txt', 'b.txt', 'c.txt'].map((name) => join(dir, 'source', name));
+      for (const file of [a, b, c]) await writeFile(file, 'x');
+      const { app, page } = await launchOpened(join(dir, 'userData'), workspace, [a, b, c]);
+      const nodes = async () => JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8')).nodes;
       try {
-        await expect(page.getByTestId('workspace')).toBeVisible();
-        await page.getByTestId('workspace').click({ button: 'right', position: { x: 300, y: 200 } });
-        const menu = page.getByTestId('add-menu');
-        await expect(menu).toBeVisible();
-        const canvas = (await page.getByTestId('workspace').boundingBox())!;
-        const at = (await menu.boundingBox())!;
-        expect(Math.abs(at.x - (canvas.x + 300))).toBeLessThan(2);
-        expect(Math.abs(at.y - (canvas.y + 200))).toBeLessThan(2);
+        await createNode(page, { file: true, copy: true });
+        const node = page.getByTestId('node');
+        const dialog = page.getByTestId('node-dialog');
 
-        await page.getByTestId('choose-create').hover();
-        await page.getByTestId('choose-information').click();
-        await expect(menu).toHaveCount(0);
-        await page.getByTestId('information-text').fill('remember');
-        await page.getByTestId('information-create').click();
-        await expect(page.getByTestId('node')).toHaveText('remember');
+        await node.dblclick();
+        await expect(dialog.getByTestId('node-path')).toHaveText('a.txt');
+        await expect(dialog.getByTestId('node-copy')).toBeChecked();
+        await expect(dialog.getByTestId('node-copy')).toBeDisabled();
+        await dialog.getByTestId('node-file').click();
+        await expect(dialog.getByTestId('node-path')).toHaveText(b);
+        await expect(dialog.getByTestId('node-copy')).toBeEnabled();
+        await expect(dialog.getByTestId('node-title')).toHaveValue('a.txt'); // not empty, so kept
+        await dialog.getByTestId('node-submit').click();
+        const ask = page.getByTestId('keep-copy-dialog');
+        await expect(ask).toBeVisible();
+        await ask.getByTestId('delete-copy').click();
+        await expect(dialog).toHaveCount(0);
+        await expect.poll(async () => (await readdir(workspace)).sort()).toEqual(['.lock', 'b.txt', 'workspace.json']);
+        expect(await nodes()).toMatchObject([{ filename: 'b.txt', path: 'b.txt' }]);
 
-        // Escape closes the popup without choosing anything.
-        await page.getByTestId('workspace').click({ button: 'right', position: { x: 300, y: 200 } });
-        await expect(menu).toBeVisible();
-        await page.keyboard.press('Escape');
-        await expect(menu).toHaveCount(0);
+        // Not copied this time, and the old copy kept.
+        await node.dblclick();
+        await dialog.getByTestId('node-file').click();
+        await expect(dialog.getByTestId('node-path')).toHaveText(c);
+        await dialog.getByTestId('node-copy').uncheck();
+        await dialog.getByTestId('node-submit').click();
+        await ask.getByTestId('keep-copy').click();
+        await expect(dialog).toHaveCount(0);
+        await expect.poll(async () => (await nodes())[0].path).toBe(c);
+        expect((await readdir(workspace)).sort()).toEqual(['.lock', 'b.txt', 'workspace.json']);
       } finally {
         await app.close().catch(() => undefined);
       }
     });
   });
 
-  test('double-clicking a file node opens the file with the system; double-clicking a note opens the note dialog with its text', async () => {
+  test('ticking copying for a node whose file is outside the workspace copies the file in on Save', async () => {
     await withTemp(async (dir) => {
-      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'));
+      const workspace = join(dir, 'ws');
+      await mkdir(join(dir, 'source'));
+      const source = join(dir, 'source', 'outside.txt');
+      await writeFile(source, 'x');
+      const { app, page } = await launchOpened(join(dir, 'userData'), workspace, [source]);
       try {
-        await expect(page.getByTestId('workspace')).toBeVisible();
-        // Stand in for the system's file association, so the test opens nothing.
-        await app.evaluate(({ shell }) => {
-          const opened: string[] = [];
-          (globalThis as unknown as { opened: string[] }).opened = opened;
-          shell.openPath = async (path: string) => (opened.push(path), '');
-        });
-
-        await page.getByTestId('add').click();
-        await page.getByTestId('choose-create').hover();
-        await page.getByTestId('choose-text').click();
-        await page.getByTestId('text-name').fill('shopping');
-        await page.getByTestId('text-create').click();
-        await page.getByTestId('add').click();
-        await page.getByTestId('choose-create').hover();
-        await page.getByTestId('choose-information').click();
-        await page.getByTestId('information-text').fill('remember\nthe milk');
-        await page.getByTestId('information-create').click();
-        await expect(page.getByTestId('node')).toHaveCount(2);
-
-        await page.locator('[data-handler=default]').dblclick();
-        await expect.poll(() => app.evaluate(() => (globalThis as unknown as { opened: string[] }).opened)).toEqual([join(dir, 'ws', 'shopping.txt')]);
-        await expect(page.getByTestId('information-text')).toHaveCount(0);
-
-        await page.locator('[data-handler=text]').dblclick();
-        await expect(page.getByTestId('information-text')).toHaveValue('remember\nthe milk');
-        await expect(page.getByTestId('information-update')).toHaveText('Update');
-        await expect(page.getByTestId('update-dialog')).toBeVisible();
-        await expect(page.getByTestId('update-dialog')).not.toContainText('Information');
-        await page.keyboard.press('Escape');
-        await expect(page.getByTestId('update-dialog')).toHaveCount(0);
-        expect(await app.evaluate(() => (globalThis as unknown as { opened: string[] }).opened)).toHaveLength(1);
-
-        // Saving the dialog replaces the note's text; no new note appears.
-        await page.locator('[data-handler=text]').dblclick();
-        await page.getByTestId('information-text').fill('remember the bread');
-        await page.getByTestId('information-update').click();
-        await expect(page.getByTestId('update-dialog')).toHaveCount(0);
-        await expect(page.getByTestId('node')).toHaveCount(2);
-        await expect(page.locator('[data-handler=text]')).toHaveText('remember the bread');
-        const info = JSON.parse(await readFile(join(dir, 'ws', 'workspace.json'), 'utf8'));
-        expect(info.nodes.filter((node: { items?: string[] }) => node.items)).toMatchObject([{ items: ['remember the bread'] }]);
-      } finally {
-        await app.close().catch(() => undefined);
-      }
-    });
-  });
-
-  test('right-clicking a node opens the note dialog; the new note is linked to that node with a weight of 10', async () => {
-    await withTemp(async (dir) => {
-      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'));
-      try {
-        await expect(page.getByTestId('workspace')).toBeVisible();
-        await page.getByTestId('add').click();
-        await page.getByTestId('choose-create').hover();
-        await page.getByTestId('choose-text').click();
-        await page.getByTestId('text-name').fill('shopping');
-        await page.getByTestId('text-create').click();
-        await expect(page.getByTestId('node')).toHaveCount(1);
-
-        await page.getByTestId('node').click({ button: 'right' });
-        await expect(page.getByTestId('add-menu')).toHaveCount(0); // not the popup for an empty part
-        await expect(page.getByTestId('information-text')).toHaveValue('');
-        await expect(page.getByTestId('add-dialog')).not.toContainText('Information');
-        await expect(page.getByTestId('information-create')).toHaveText('Create');
-        await page.getByTestId('information-text').fill('buy milk');
-        await page.getByTestId('information-create').click();
-        await expect(page.getByTestId('add-dialog')).toHaveCount(0);
-        await expect(page.getByTestId('node')).toHaveCount(2);
-        await expect(page.getByTestId('link')).toHaveCount(1);
-
-        const info = JSON.parse(await readFile(join(dir, 'ws', 'workspace.json'), 'utf8'));
-        const file = info.nodes.find((node: { filename?: string }) => node.filename);
-        const note = info.nodes.find((node: { items?: string[] }) => node.items);
-        expect(note.items).toEqual(['buy milk']);
-        expect(info.links).toMatchObject([{ source: note.id, target: file.id, weight: 10 }]);
+        await createNode(page, { file: true });
+        await page.getByTestId('node').dblclick();
+        const dialog = page.getByTestId('node-dialog');
+        await expect(dialog.getByTestId('node-path')).toHaveText(source);
+        await expect(dialog.getByTestId('node-copy')).not.toBeChecked();
+        await dialog.getByTestId('node-copy').check();
+        await dialog.getByTestId('node-submit').click();
+        await expect(dialog).toHaveCount(0);
+        await expect(page.getByTestId('keep-copy-dialog')).toHaveCount(0);
+        await expect.poll(async () => JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8')).nodes[0].path).toBe('outside.txt');
+        expect(await readFile(join(workspace, 'outside.txt'), 'utf8')).toBe('x');
+        expect(await readFile(source, 'utf8')).toBe('x');
       } finally {
         await app.close().catch(() => undefined);
       }
@@ -442,20 +508,16 @@ test.describe('electron shell: workspace', () => {
 
   test('linked nodes line up on a horizontal or vertical axis, centred on it, and their link joins the facing connection points', async () => {
     await withTemp(async (dir) => {
-      const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'));
+      // A hub (a file node) with three nodes linked to it, written before the workspace is opened.
+      const folder = join(dir, 'ws');
+      await mkdir(folder);
+      await writeFile(join(folder, 'hub.txt'), 'x');
+      const plain = (id: string, title: string) => ({ id, addedAt: '2026-01-01T00:00:00.000Z', title, description: null, body: null, display: ['title'] });
+      const nodes = [{ ...plain('hub', 'hub.txt'), filename: 'hub.txt', path: 'hub.txt' }, plain('one', 'one'), plain('two', 'two'), plain('three', 'three')];
+      const links = ['one', 'two', 'three'].map((id) => ({ id: `link-${id}`, source: id, target: 'hub', weight: 10 }));
+      await writeFile(join(folder, 'workspace.json'), JSON.stringify({ appId: 'terrane', nodes, links }));
+      const { app, page } = await launchOpened(join(dir, 'userData'), folder);
       try {
-        await expect(page.getByTestId('workspace')).toBeVisible();
-        await page.getByTestId('add').click();
-        await page.getByTestId('choose-create').hover();
-        await page.getByTestId('choose-text').click();
-        await page.getByTestId('text-name').fill('hub');
-        await page.getByTestId('text-create').click();
-        for (const note of ['one', 'two', 'three']) {
-          await page.locator('[data-handler=default]').click({ button: 'right' });
-          await page.getByTestId('information-text').fill(note);
-          await page.getByTestId('information-create').click();
-          await expect(page.getByTestId('add-dialog')).toHaveCount(0);
-        }
         await expect(page.getByTestId('link')).toHaveCount(3);
 
         const boxes = async () => {
@@ -584,7 +646,7 @@ test.describe('electron shell: security', () => {
         protocol: location.protocol,
       }));
       expect(exposed).toMatchObject({ require: 'undefined', process: 'undefined', buffer: 'undefined', electron: 'undefined', isolated: true, protocol: 'app:' });
-      expect(exposed.workspaceBridge).toEqual(['addFile', 'createInformation', 'createInformationLinked', 'createLink', 'createText', 'current', 'openNode', 'readNode', 'setLinkWeight', 'updateInformation']);
+      expect(exposed.workspaceBridge).toEqual(['createLink', 'createNode', 'current', 'pickFile', 'readNode', 'setLinkWeight', 'updateNode']);
       expect(exposed.groups).toEqual(['app', 'credentials', 'data', 'net', 'sidecar', 'workspace']);
       await app.close();
     });

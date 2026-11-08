@@ -1,31 +1,65 @@
 import { acquireLock, FORMAT_VERSION, type WorkspaceLock } from './lock';
 import { randomUUID } from 'node:crypto';
-import { access, constants, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, extname, join } from 'node:path';
+import { access, constants, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { basename, extname, isAbsolute, join } from 'node:path';
 
-/** An entry of the `nodes` array in `workspace.json`: a file that was added to the workspace. */
-export interface WorkspaceNode {
+/** The text fields of a node, in the order they are shown. */
+export const DISPLAY_FIELDS = ['title', 'description', 'body'] as const;
+export type DisplayField = (typeof DISPLAY_FIELDS)[number];
+
+/** An entry of the `nodes` array in `workspace.json`. Every node is one of these; a node with a file is a `FileNode`. */
+export interface TerraneNode {
   id: string;
-  /** The name of the copy inside the workspace folder. */
-  filename: string;
-  /** Size in bytes. */
-  size: number;
   addedAt: string;
+  title: string | null;
+  description: string | null;
+  body: string | null;
+  /** The fields shown in the node's display (at least one, each with text), in the order title, description, body. */
+  display: DisplayField[];
 }
 
-/** An entry of the `nodes` array in `workspace.json` that is not a file: it stores a single string, in `items`. */
-export interface InformationNode {
-  id: string;
-  addedAt: string;
-  /** Holds the node's one string. */
-  items: string[];
+/** A node with a file. */
+export interface FileNode extends TerraneNode {
+  /** The file's name. */
+  filename: string;
+  /** Where the file is: relative to the workspace folder if it was copied into the workspace, otherwise the absolute path of the original. */
+  path: string;
 }
 
 /** Either kind of entry in `nodes`. */
-export type NodeRecord = WorkspaceNode | InformationNode;
+export type NodeRecord = TerraneNode | FileNode;
 
-export function isInformationNode(node: NodeRecord): node is InformationNode {
-  return 'items' in node;
+export function isFileNode(node: NodeRecord): node is FileNode {
+  return 'path' in node;
+}
+
+/** What the node dialog sends to create or save a node. Empty strings are stored as `null`. */
+export interface NodeInput {
+  title: string;
+  description: string;
+  body: string;
+  display: DisplayField[];
+  /** The node's file, if it has one. `source` is a newly chosen file (absent: the node keeps its current one); `copy` is whether the file is (to be) copied into the workspace. */
+  file?: { source?: string; copy: boolean };
+  /** When saving replaces a file that was copied into the workspace: whether that copy is kept in the workspace folder. */
+  keepOldCopy?: boolean;
+}
+
+/** `value` as a `NodeInput`, or an error if it is not one. */
+export function parseNodeInput(value: unknown): NodeInput {
+  const input = value as Partial<NodeInput> | null;
+  const valid =
+    typeof input === 'object' &&
+    input !== null &&
+    typeof input.title === 'string' &&
+    typeof input.description === 'string' &&
+    typeof input.body === 'string' &&
+    Array.isArray(input.display) &&
+    input.display.every((field) => DISPLAY_FIELDS.includes(field)) &&
+    (input.file === undefined || (typeof input.file === 'object' && input.file !== null && typeof input.file.copy === 'boolean' && (input.file.source === undefined || typeof input.file.source === 'string'))) &&
+    (input.keepOldCopy === undefined || typeof input.keepOldCopy === 'boolean');
+  if (!valid) throw new Error('Invalid node');
+  return { title: input.title!, description: input.description!, body: input.body!, display: input.display!, file: input.file && { source: input.file.source, copy: input.file.copy }, keepOldCopy: input.keepOldCopy };
 }
 
 /** An entry of the `links` array in `workspace.json`: a connection from a source node to a target node. */
@@ -56,10 +90,6 @@ export interface OpenResult {
 export interface WorkspaceOptions {
   appId: string;
   createdBy: string;
-  /** Shows the file dialog (a single file); resolves with `undefined` if the user cancels. */
-  pickFile: () => Promise<string | undefined>;
-  /** Opens a file with the application the system associates with its type; resolves with an error message, or an empty string if it worked. */
-  openPath: (path: string) => Promise<string>;
   onOpened?: (root: string) => void | Promise<void>;
   onClosed?: () => void | Promise<void>;
   onHookError?: (error: unknown) => void;
@@ -68,8 +98,21 @@ export interface WorkspaceOptions {
 const WORKSPACE_FILE = 'workspace.json';
 /** The weight of a new link. */
 const NEW_LINK_WEIGHT = 5;
-/** The weight of the link from a note created by right-clicking a node to that node. */
-const ATTACHED_NOTE_WEIGHT = 10;
+
+/** The text fields of `input` (empty strings as `null`) and the fields it shows: those ticked that have text, in display order. Refused if none is shown. */
+function textFields(input: NodeInput): Pick<TerraneNode, 'title' | 'description' | 'body' | 'display'> {
+  const fields = { title: input.title || null, description: input.description || null, body: input.body || null };
+  const display = DISPLAY_FIELDS.filter((field) => input.display.includes(field) && fields[field] !== null);
+  if (display.length === 0) throw new Error('A node must show at least one field with text');
+  return { ...fields, display };
+}
+
+/** The `filename` and `path` of a file left where it is (not copied into the workspace); it must exist and have an absolute path. */
+async function outsideFile(source: string): Promise<Pick<FileNode, 'filename' | 'path'>> {
+  if (!isAbsolute(source)) throw new Error(`Not an absolute path: ${source}`);
+  await access(source);
+  return { filename: basename(source), path: source };
+}
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -102,84 +145,73 @@ export class Workspace {
     return this.root;
   }
 
-  /** Lets the user pick a file, copies it into the workspace folder and records it in the `nodes` of `workspace.json`. */
-  async addFile(): Promise<OpenResult> {
+  /** Records a node made from `input` in the `nodes` of `workspace.json`, copying its file into the workspace folder if `input.file.copy` is set. */
+  async createNode(input: NodeInput): Promise<OpenResult> {
     try {
       const root = this.root;
       if (!root) throw new Error('No workspace is open');
-      const source = await this.options.pickFile();
-      if (!source) return { status: 'cancelled', workspace: this.state() };
-      const filename = await this.freeName(root, basename(source));
-      const target = join(root, filename);
-      await copyFile(source, target, constants.COPYFILE_EXCL);
-      await this.recordNode(root, filename);
+      const texts = textFields(input);
+      let node: NodeRecord = { id: randomUUID(), addedAt: new Date().toISOString(), ...texts };
+      let copied: string | undefined;
+      if (input.file) {
+        const { source, copy } = input.file;
+        if (!source) throw new Error('No file was chosen');
+        if (copy) {
+          copied = await this.copyIn(root, source);
+          node = { ...node, filename: copied, path: copied };
+        } else {
+          node = { ...node, ...(await outsideFile(source)) };
+        }
+      }
+      await this.saveNodes(root, [...this.nodes, node], copied);
       return { status: 'opened', workspace: this.state() };
     } catch (error) {
       return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
     }
   }
 
-  /** Creates a `.txt` file with `text` in the workspace folder (`.txt` is added to the name if it is missing) and records it in `nodes`. */
-  async createText(name: string, text: string): Promise<OpenResult> {
+  /**
+   * Replaces the node `id` with one made from `input` in the `nodes` of `workspace.json`. A node with a file keeps one. Its
+   * file is copied into the workspace folder if `input.file.copy` is newly set; a file already copied in stays copied
+   * unless another file is chosen, and then the old copy is removed from the folder unless `input.keepOldCopy` is set.
+   */
+  async updateNode(id: string, input: NodeInput): Promise<OpenResult> {
     try {
       const root = this.root;
       if (!root) throw new Error('No workspace is open');
-      const wanted = name.trim();
-      if (!wanted || wanted === '.' || wanted === '..' || /[<>:"/\\|?*\x00-\x1f]/.test(wanted)) throw new Error(`Not a valid file name: ${name}`);
-      const filename = await this.freeName(root, extname(wanted).toLowerCase() === '.txt' ? wanted : `${wanted}.txt`);
-      await writeFile(join(root, filename), text, { flag: 'wx' });
-      await this.recordNode(root, filename);
-      return { status: 'opened', workspace: this.state() };
-    } catch (error) {
-      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
-    }
-  }
-
-  /** Records an information node holding `text` in the `nodes` of `workspace.json`; no file is created. An empty string is refused. */
-  async createInformation(text: string): Promise<OpenResult> {
-    try {
-      const root = this.root;
-      if (!root) throw new Error('No workspace is open');
-      if (text === '') throw new Error('An information node cannot be empty');
-      const node: InformationNode = { id: randomUUID(), addedAt: new Date().toISOString(), items: [text] };
-      const nodes = [...this.nodes, node];
-      await this.writeNodes(root, nodes);
-      this.nodes = nodes;
-      return { status: 'opened', workspace: this.state() };
-    } catch (error) {
-      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
-    }
-  }
-
-  /** Records an information node holding `text`, and a link from it to the node `target` with the weight of an attached note, in `workspace.json`. An empty string is refused. */
-  async createInformationLinked(text: string, target: string): Promise<OpenResult> {
-    try {
-      const root = this.root;
-      if (!root) throw new Error('No workspace is open');
-      if (text === '') throw new Error('An information node cannot be empty');
-      if (!this.nodes.some((node) => node.id === target)) throw new Error('Not a valid link');
-      const node: InformationNode = { id: randomUUID(), addedAt: new Date().toISOString(), items: [text] };
-      const nodes = [...this.nodes, node];
-      const links = [...this.links, { id: randomUUID(), source: node.id, target, weight: ATTACHED_NOTE_WEIGHT }];
-      await this.writeEntries(root, { nodes, links });
-      this.nodes = nodes;
-      this.links = links;
-      return { status: 'opened', workspace: this.state() };
-    } catch (error) {
-      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
-    }
-  }
-
-  /** Replaces the string of the information node `id` with `text` in the `nodes` of `workspace.json`. An empty string is refused. */
-  async updateInformation(id: string, text: string): Promise<OpenResult> {
-    try {
-      const root = this.root;
-      if (!root) throw new Error('No workspace is open');
-      if (text === '') throw new Error('An information node cannot be empty');
-      if (!this.nodes.some((node) => node.id === id && isInformationNode(node))) throw new Error('No such information node in the workspace');
-      const nodes = this.nodes.map((node) => (node.id === id ? { ...node, items: [text] } : node));
-      await this.writeNodes(root, nodes);
-      this.nodes = nodes;
+      const current = this.nodes.find((node) => node.id === id);
+      if (!current) throw new Error('No such node in the workspace');
+      const texts = textFields(input);
+      let node: NodeRecord = { id, addedAt: current.addedAt, ...texts };
+      const currentFile = isFileNode(current) ? current : undefined;
+      const wasCopied = currentFile !== undefined && !isAbsolute(currentFile.path);
+      let copied: string | undefined;
+      let discard: string | undefined;
+      if (input.file) {
+        const { source, copy } = input.file;
+        if (source) {
+          if (copy) {
+            copied = await this.copyIn(root, source);
+            node = { ...node, filename: copied, path: copied };
+          } else {
+            node = { ...node, ...(await outsideFile(source)) };
+          }
+          if (wasCopied && !input.keepOldCopy) discard = currentFile.path;
+        } else {
+          if (!currentFile) throw new Error('No file was chosen');
+          if (wasCopied && !copy) throw new Error('A file copied into the workspace stays there until another file is chosen');
+          if (!wasCopied && copy) {
+            copied = await this.copyIn(root, currentFile.path);
+            node = { ...node, filename: copied, path: copied };
+          } else {
+            node = { ...node, filename: currentFile.filename, path: currentFile.path };
+          }
+        }
+      } else if (currentFile) {
+        throw new Error('A node with a file keeps a file');
+      }
+      await this.saveNodes(root, this.nodes.map((candidate) => (candidate.id === id ? node : candidate)), copied);
+      if (discard && basename(discard) === discard) await rm(join(root, discard), { force: true });
       return { status: 'opened', workspace: this.state() };
     } catch (error) {
       return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
@@ -217,38 +249,31 @@ export class Workspace {
     }
   }
 
-  /** Adds the file `filename`, already in the workspace folder, to `nodes`; if that fails the file is removed again. */
-  private async recordNode(root: string, filename: string): Promise<void> {
-    const target = join(root, filename);
+  /** Copies the file at `source` into the workspace folder, under a free name; resolves with that name. */
+  private async copyIn(root: string, source: string): Promise<string> {
+    const filename = await this.freeName(root, basename(source));
+    await copyFile(source, join(root, filename), constants.COPYFILE_EXCL);
+    return filename;
+  }
+
+  /** Writes `nodes` to `workspace.json` and keeps them; if that fails, the file `copied` (just copied into the workspace folder) is removed again. */
+  private async saveNodes(root: string, nodes: NodeRecord[], copied?: string): Promise<void> {
     try {
-      const node: WorkspaceNode = { id: randomUUID(), filename, size: (await stat(target)).size, addedAt: new Date().toISOString() };
-      const nodes = [...this.nodes, node];
       await this.writeNodes(root, nodes);
       this.nodes = nodes;
     } catch (error) {
-      await rm(target, { force: true });
+      if (copied) await rm(join(root, copied), { force: true });
       throw error;
     }
   }
 
-  /** The contents of the file behind one node, base64-encoded. Only files that are nodes of the open workspace can be read; information nodes have no file. */
+  /** The contents of the file behind one node, base64-encoded. Only the files of nodes of the open workspace can be read. */
   async readNode(id: string): Promise<string> {
     const node = this.nodes.find((candidate) => candidate.id === id);
-    if (!this.root || !node || isInformationNode(node) || basename(node.filename) !== node.filename) throw new Error('No such file in the workspace');
-    return (await readFile(join(this.root, node.filename))).toString('base64');
-  }
-
-  /** Opens the file behind one node with the application the system associates with its type. Only files that are nodes of the open workspace can be opened. */
-  async openNode(id: string): Promise<OpenResult> {
-    try {
-      const node = this.nodes.find((candidate) => candidate.id === id);
-      if (!this.root || !node || isInformationNode(node) || basename(node.filename) !== node.filename) throw new Error('No such file in the workspace');
-      const message = await this.options.openPath(join(this.root, node.filename));
-      if (message) throw new Error(message);
-      return { status: 'opened', workspace: this.state() };
-    } catch (error) {
-      return { status: 'failed', message: error instanceof Error ? error.message : String(error), workspace: this.state() };
-    }
+    if (!this.root || !node || !isFileNode(node)) throw new Error('No such file in the workspace');
+    if (isAbsolute(node.path)) return (await readFile(node.path)).toString('base64');
+    if (basename(node.path) !== node.path) throw new Error('No such file in the workspace');
+    return (await readFile(join(this.root, node.path))).toString('base64');
   }
 
   async close(): Promise<void> {

@@ -6,7 +6,7 @@ import { delimiter, join, normalize, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { APP_ID, APP_NAME, externalLinkOrigins, services } from './config';
 import { createSidecar } from './sidecar';
-import { Workspace } from './workspace';
+import { parseNodeInput, Workspace } from './workspace';
 
 const APP_ORIGIN = 'app://app';
 // In development the renderer is served by the Vite dev server; in a build it is served from the app:// protocol.
@@ -36,12 +36,13 @@ async function pickFolder({ title, defaultPath }: { title: string; defaultPath: 
 /** Test-only: in a development run AB_E2E_PICK_FILE answers the file dialogs, one path per dialog. */
 const scriptedFiles: string[] = !app.isPackaged && process.env['AB_E2E_PICK_FILE'] ? process.env['AB_E2E_PICK_FILE'].split(delimiter) : [];
 
-async function pickFile(): Promise<string | undefined> {
-  if (scriptedFiles.length > 0) return scriptedFiles.shift();
-  const options: Electron.OpenDialogOptions = { title: 'Choose a file to add to the workspace', properties: ['openFile'] };
+/** Shows the OS file picker (a single file); `null` if the user cancels. */
+async function pickFile(): Promise<string | null> {
+  if (scriptedFiles.length > 0) return scriptedFiles.shift() || null;
+  const options: Electron.OpenDialogOptions = { title: 'Choose a file for the node', properties: ['openFile'] };
   const window = BrowserWindow.getFocusedWindow();
   const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
-  return result.canceled ? undefined : result.filePaths[0];
+  return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]!;
 }
 
 function serveRenderer(): void {
@@ -134,8 +135,6 @@ if (!app.requestSingleInstanceLock()) {
     const workspace = new Workspace({
       appId: APP_ID,
       createdBy: `${APP_ID} ${app.getVersion()}`,
-      pickFile,
-      openPath: (path) => shell.openPath(path),
       onOpened: () => sidecar?.start(),
       onClosed: () => sidecar?.stop(),
       onHookError: (error) => log('[workspace] hook failed:', error instanceof Error ? error.message : error),
@@ -175,30 +174,12 @@ if (!app.requestSingleInstanceLock()) {
     };
     ipcMain.handle('terrane:workspace.current', (event) => (trusted(event), workspace.state()));
     ipcMain.handle('terrane:workspace.readNode', (event, id: unknown) => (trusted(event), typeof id === 'string' ? workspace.readNode(id) : Promise.reject(new Error('Invalid node id'))));
-    ipcMain.handle('terrane:workspace.openNode', (event, id: unknown) => {
+    ipcMain.handle('terrane:workspace.pickFile', (event) => (trusted(event), pickFile()));
+    ipcMain.handle('terrane:workspace.createNode', (event, input: unknown) => (trusted(event), workspace.createNode(parseNodeInput(input))));
+    ipcMain.handle('terrane:workspace.updateNode', (event, id: unknown, input: unknown) => {
       trusted(event);
       if (typeof id !== 'string') throw new Error('Invalid node id');
-      return workspace.openNode(id);
-    });
-    ipcMain.handle('terrane:workspace.createText', (event, name: unknown, text: unknown) => {
-      trusted(event);
-      if (typeof name !== 'string' || typeof text !== 'string') throw new Error('Invalid text file');
-      return workspace.createText(name, text);
-    });
-    ipcMain.handle('terrane:workspace.createInformation', (event, text: unknown) => {
-      trusted(event);
-      if (typeof text !== 'string') throw new Error('Invalid information node');
-      return workspace.createInformation(text);
-    });
-    ipcMain.handle('terrane:workspace.createInformationLinked', (event, text: unknown, target: unknown) => {
-      trusted(event);
-      if (typeof text !== 'string' || typeof target !== 'string') throw new Error('Invalid information node');
-      return workspace.createInformationLinked(text, target);
-    });
-    ipcMain.handle('terrane:workspace.updateInformation', (event, id: unknown, text: unknown) => {
-      trusted(event);
-      if (typeof id !== 'string' || typeof text !== 'string') throw new Error('Invalid information node');
-      return workspace.updateInformation(id, text);
+      return workspace.updateNode(id, parseNodeInput(input));
     });
     ipcMain.handle('terrane:workspace.createLink', (event, source: unknown, target: unknown) => {
       trusted(event);
@@ -210,7 +191,6 @@ if (!app.requestSingleInstanceLock()) {
       if (typeof id !== 'string' || typeof weight !== 'number') throw new Error('Invalid link weight');
       return workspace.setLinkWeight(id, weight);
     });
-    ipcMain.handle('terrane:workspace.addFile', (event) => (trusted(event), workspace.addFile()));
     try {
       await manager.restore();
       if (manager.workspace) await workspace.openFolder(manager.workspace.path);
