@@ -157,6 +157,10 @@ export function Canvas({ nodes, links, onCreateLink, onSetWeight, onEmptyContext
       ref={canvas}
       className="relative flex min-h-0 flex-1 overflow-auto"
       data-testid="workspace"
+      // A click on the background (the canvas itself or its content area, not a display or the dialog) deselects.
+      onClick={(event) => {
+        if (event.target === canvas.current || event.target === content.current) setSelected(undefined);
+      }}
       onContextMenu={(event) => {
         const target = event.target as Element;
         // On a node's display: the node. Otherwise only an empty part counts, not a link (its wide invisible path takes the clicks).

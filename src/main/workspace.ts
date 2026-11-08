@@ -201,12 +201,12 @@ export class Workspace {
     }
   }
 
-  /** Sets the weight (a whole number from 1 to 10) of the link `id` in `workspace.json`. */
+  /** Sets the weight (a number from 1 to 10) of the link `id` in `workspace.json`. */
   async setLinkWeight(id: string, weight: number): Promise<OpenResult> {
     try {
       const root = this.root;
       if (!root) throw new Error('No workspace is open');
-      if (!Number.isInteger(weight) || weight < 1 || weight > 10) throw new Error(`Not a valid weight: ${weight}`);
+      if (!Number.isFinite(weight) || weight < 1 || weight > 10) throw new Error(`Not a valid weight: ${weight}`);
       if (!this.links.some((link) => link.id === id)) throw new Error('No such link in the workspace');
       const links = this.links.map((link) => (link.id === id ? { ...link, weight } : link));
       await this.writeLinks(root, links);

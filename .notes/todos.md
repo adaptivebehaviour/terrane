@@ -1,4 +1,13 @@
-- [ ] Update the application with the most recent updates to Manifesto.
-- [ ] Expand on the nodes and their displays to include fields like "title", "description", "body" etc. Size the node displays based on the information selected when creating the node - which should be done with an extended dialog. Customise this through the handlers. See the email for more on this.
+- [x] Clicking on the background deselects any selected object.
+- [x] Make the link weights continuous.
+- [ ] Expand on the nodes and their displays to include fields like "title", "description", "body" etc.  Make all nodes into objects. Nodes that are a file have the file as the body. Note that not all nodes that may link to a file are file nodes - see "papers".
+- [ ] Remove the popup menu from add and integrate create and import into the same dialog.
+- [ ] Size the node displays based on the information selected (title, description etc) when creating the node - which should be done with an extended dialog. Customise this through the handlers. 
+- [ ] Make it so that the handles on the edges of the node display are for resizing the node. Disconnect them from any link functionality.
+- [ ] Users create links by clicking and dragging on the source node and releasing on the target nodes. Releasing when not on a target node brings up a list of nodes (excluding the source node). Silently exit self-connecting nodes.
 - [ ] Implement a "papers" collection and make it so that the PDF file nodes consist only of the data - point to the location of the file in the data but don't make a big deal out of it if it isn't there.
-- [ ] Create a left-hand panel that lists all the nodes regardless of whether or not they are connected i.e. papers.
+- [ ] Allow users to make a copy of the file in the workspace but don't make this the default as it is at the moment.
+- [ ] Create a hideable panel on the left-hand side under the toolbar that lists all the nodes.
+- [ ] In connection to the above, allow for the bulk import of nodes and links.
+- [ ] 
+
