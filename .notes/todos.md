@@ -2,12 +2,10 @@
 - [x] Make the link weights continuous.
 - [x] Expand on the nodes and their displays to include fields like "title", "description", "body" etc.  Make all nodes into objects. Nodes that are a file have the file as the body. Note that not all nodes that may link to a file are file nodes - see "papers".
 - [x] Remove the popup menu from add and integrate create and import into the same dialog.
-- [ ] Size the node displays based on the information selected (title, description etc) when creating the node - which should be done with an extended dialog. Customise this through the handlers. 
-- [ ] Make it so that the handles on the edges of the node display are for resizing the node. Disconnect them from any link functionality.
-- [ ] Users create links by clicking and dragging on the source node and releasing on the target nodes. Releasing when not on a target node brings up a list of nodes (excluding the source node). Silently exit self-connecting nodes.
-- [ ] Implement a "papers" collection and make it so that the PDF file nodes consist only of the data - point to the location of the file in the data but don't make a big deal out of it if it isn't there.
-- [ ] Allow users to make a copy of the file in the workspace but don't make this the default as it is at the moment.
-- [ ] Create a hideable panel on the left-hand side under the toolbar that lists all the nodes.
-- [ ] In connection to the above, allow for the bulk import of nodes and links.
-- [ ] 
-
+- [x] Size the node displays based on the information selected (title, description etc) when creating the node - which should be done with an extended dialog. 
+- [x] Users create links by clicking and dragging on the source node and releasing on the target nodes. Releasing when not on a target node brings up a list of nodes (excluding the source node). Silently exit self-connecting nodes.
+- [x] Allow users to make a copy of the file in the workspace but don't make this the default as it is at the moment.
+- [x] Create a hideable panel on the left-hand side under the toolbar that lists all the nodes. Divide it into two sections: unlinked (at the top) and linked (at the bottom)
+- [ ] Implement the bulk import of nodes and links.
+- [ ] Make it so that the handles on the edges of the node display are for resizing the node.  
+- [] Implement a "papers" collection and make it so that the PDF file nodes consist only of the data - point to the location of the file in the data but don't make a big deal out of it if it isn't there.

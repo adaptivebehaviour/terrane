@@ -70,6 +70,38 @@ async function createNode(page: Page, fields: NodeFields): Promise<void> {
   await expect(dialog).toHaveCount(0);
 }
 
+/** A text node as written to workspace.json, showing its title. */
+const plain = (id: string, title: string) => ({ id, addedAt: '2026-01-01T00:00:00.000Z', title, description: null, body: null, display: ['title'] });
+
+/** A 1x1 PNG, base64-encoded. */
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+/** The node list's entry whose text is `text` (a string matches the whole text). */
+function entry(page: Page, text: string | RegExp) {
+  const pattern = typeof text === 'string' ? new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) : text;
+  return page.getByTestId('node-entry').filter({ has: page.getByTestId('node-entry-text').filter({ hasText: pattern }) });
+}
+
+/** Closes the weight dialog that opens when a link is created. */
+async function closeWeightDialog(page: Page): Promise<void> {
+  await expect(page.getByTestId('weight-dialog')).toBeVisible();
+  await page.getByTestId('weight-save').click();
+  await expect(page.getByTestId('weight-dialog')).toHaveCount(0);
+}
+
+/**
+ * Links the node whose entry text is `source` to the one whose entry text is `target` with the node popup, closes the
+ * weight dialog that opens, and waits for both to be on the canvas.
+ */
+async function link(page: Page, source: string | RegExp, target: string | RegExp): Promise<void> {
+  const [sourceId, targetId] = await Promise.all([entry(page, source).getAttribute('data-node-id'), entry(page, target).getAttribute('data-node-id')]);
+  await entry(page, source).click({ button: 'right' });
+  await page.locator(`[data-testid=node-menu-item][data-node-id="${targetId}"]`).click();
+  await expect(page.getByTestId('node-menu')).toHaveCount(0);
+  await closeWeightDialog(page);
+  for (const id of [sourceId, targetId]) await expect(page.getByTestId('workspace').locator(`[data-node-id="${id}"]`)).toHaveCount(1);
+}
+
 async function withTemp<T>(body: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'ab-electron-e2e-'));
   try {
@@ -216,11 +248,10 @@ test.describe('electron shell: workspace', () => {
         await dialog.getByTestId('node-submit').click();
         await expect(dialog).toHaveCount(0);
 
-        const node = page.getByTestId('node');
-        await expect(node).toHaveText('just a body');
-        await expect(node).toHaveAttribute('data-handler', 'text');
-        const box = await node.boundingBox();
-        expect([Math.round(box!.width), Math.round(box!.height)]).toEqual([100, 100]);
+        // A new node has no link: it is in the unlinked part of the node list, not on the canvas.
+        const entries = page.getByTestId('unlinked-nodes').getByTestId('node-entry-text');
+        await expect(entries).toHaveText(['just a body']);
+        await expect(page.getByTestId('node')).toHaveCount(0);
         const info = JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8'));
         expect(info.appId).toBe('terrane'); // the rest of workspace.json is kept
         expect(info.nodes).toEqual([{ id: expect.any(String), addedAt: expect.any(String), title: null, description: null, body: 'just a body', display: ['body'] }]);
@@ -232,12 +263,21 @@ test.describe('electron shell: workspace', () => {
         await dialog.getByTestId('node-title').fill('never');
         await page.keyboard.press('Escape');
         await expect(dialog).toHaveCount(0);
-        await expect(node).toHaveCount(1);
+        await expect(entries).toHaveCount(1);
 
-        // Right-clicking the canvas or a node does nothing.
+        // Right-clicking the canvas's background does nothing.
         await page.getByTestId('workspace').click({ button: 'right', position: { x: 10, y: 10 } });
-        await node.click({ button: 'right' });
         await expect(page.locator('dialog[open], [role=menu]')).toHaveCount(0);
+
+        // Once linked, the node is on the canvas: the text handler's display, 162 wide and only as tall as its one line needs.
+        await createNode(page, { title: 'other' });
+        await link(page, 'just a body', 'other');
+        const node = page.getByTestId('node').first();
+        await expect(node).toHaveText('just a body');
+        await expect(node).toHaveAttribute('data-handler', 'text');
+        const box = await node.boundingBox();
+        expect(Math.round(box!.width)).toBe(162);
+        expect(box!.height).toBeLessThan(100);
       } finally {
         await app.close().catch(() => undefined);
       }
@@ -252,6 +292,9 @@ test.describe('electron shell: workspace', () => {
         await createNode(page, { title: 'T2', description: 'D2', body: 'short', show: ['title', 'body'] });
         await createNode(page, { title: 'T3', description: 'D3', body: 'short', show: ['description', 'body'] });
         await createNode(page, { title: 'T4', description: 'D4', body: 'short', show: ['title'] });
+        // Only linked nodes are on the canvas.
+        await link(page, /^T\s+D\s/, /^T2\s/);
+        await link(page, /^D3\s/, 'T4');
         const lines = (index: number) => page.getByTestId('node').nth(index).getByTestId('node-line');
         await expect(lines(0)).toHaveText(['T', 'D', `${'b'.repeat(127)}…`]);
         await expect(lines(1)).toHaveText(['T2', 'short']);
@@ -287,13 +330,14 @@ test.describe('electron shell: workspace', () => {
         await expect(dialog.getByTestId('node-path')).toHaveText(source);
         await expect(dialog.getByTestId('node-title')).toHaveValue('report.txt');
         await dialog.getByTestId('node-submit').click();
-        await expect(page.getByTestId('node')).toHaveText('report.txt');
-        await expect(page.getByTestId('node')).toHaveAttribute('data-handler', 'default');
+        // The nodes have no links, so they are only in the node list.
+        const entries = page.getByTestId('node-entry-text');
+        await expect(entries).toHaveText(['report.txt']);
 
         // A title already typed is kept; copied into the workspace, a clashing name is numbered.
         await createNode(page, { title: 'mine', file: true, copy: true });
         await createNode(page, { file: true, copy: true });
-        await expect(page.getByTestId('node')).toHaveText(['report.txt', 'mine', 'report.txt']);
+        await expect(entries).toHaveText(['report.txt', 'mine', 'report.txt']);
 
         // A cancelled file dialog chooses nothing.
         await page.getByTestId('add').click();
@@ -316,7 +360,7 @@ test.describe('electron shell: workspace', () => {
 
       // The nodes come back when the workspace is reopened.
       const second = await launch(userData, join(dir, 'never-picked'));
-      await expect(second.page.getByTestId('node')).toHaveText(['report.txt', 'mine', 'report.txt']);
+      await expect(second.page.getByTestId('node-entry-text')).toHaveText(['report.txt', 'mine', 'report.txt']);
       await second.app.close();
     });
   });
@@ -331,8 +375,10 @@ test.describe('electron shell: workspace', () => {
       try {
         for (let i = 1; i <= names.length; i += 1) {
           await createNode(page, { file: true });
-          await expect(page.getByTestId('node')).toHaveCount(i);
+          await expect(page.getByTestId('node-entry')).toHaveCount(i);
         }
+        // Linked in a chain, so every node is on the canvas.
+        for (let i = 1; i < names.length; i += 1) await link(page, names[i - 1], names[i]);
         await expect(page.getByTestId('node')).toHaveText(names);
         const handlers = await page.getByTestId('node').evaluateAll((elements) => elements.map((element) => element.getAttribute('data-handler')));
         expect(handlers).toEqual(['image', 'image', 'image', 'default', 'default']);
@@ -346,15 +392,18 @@ test.describe('electron shell: workspace', () => {
     await withTemp(async (dir) => {
       await mkdir(join(dir, 'source'));
       const png = join(dir, 'source', 'dot.png');
-      // A 1x1 PNG.
-      await writeFile(png, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'));
+      await writeFile(png, Buffer.from(PNG, 'base64'));
       const { app, page } = await launchOpened(join(dir, 'userData'), join(dir, 'ws'), [png]);
       try {
         await createNode(page, { file: true, copy: true });
-        const node = page.getByTestId('node');
-        await expect(node).toHaveAttribute('data-handler', 'image');
+        // Linked to another node, so it is on the canvas.
+        await createNode(page, { title: 'other' });
+        await link(page, 'dot.png', 'other');
+        const node = page.locator('[data-testid=node][data-handler=image]');
+        await expect(node).toHaveCount(1);
         const image = node.locator('img');
         await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth)).toBe(1);
+        await expect(page.getByTestId('layout-wait')).toHaveCount(0); // the display is not moved while it is measured
 
         const box = async (locator: typeof node) => {
           const b = (await locator.boundingBox())!;
@@ -388,7 +437,7 @@ test.describe('electron shell: workspace', () => {
     });
   });
 
-  test('double-clicking a node opens the dialog filled in, with Save; saving replaces the node, cancelling changes nothing', async () => {
+  test("double-clicking a node's entry in the node list opens the dialog filled in, with Save; saving replaces the node, cancelling changes nothing", async () => {
     await withTemp(async (dir) => {
       const workspace = join(dir, 'ws');
       await mkdir(join(dir, 'source'));
@@ -398,7 +447,8 @@ test.describe('electron shell: workspace', () => {
       try {
         await createNode(page, { title: 'remember', body: 'the milk' });
         const before = JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8')).nodes[0];
-        const node = page.getByTestId('node');
+        const node = page.getByTestId('node-entry');
+        const text = node.getByTestId('node-entry-text');
 
         await node.dblclick();
         const dialog = page.getByTestId('node-dialog');
@@ -410,7 +460,7 @@ test.describe('electron shell: workspace', () => {
         await dialog.getByTestId('node-title').fill('changed');
         await page.keyboard.press('Escape');
         await expect(dialog).toHaveCount(0);
-        await expect(node).toHaveText('remember');
+        await expect(text).toHaveText('remember');
 
         // Everything can be changed, including giving the node a file.
         await node.dblclick();
@@ -423,8 +473,7 @@ test.describe('electron shell: workspace', () => {
         await dialog.getByTestId('node-submit').click();
         await expect(dialog).toHaveCount(0);
         await expect(node).toHaveCount(1);
-        await expect(node.getByTestId('node-line')).toHaveText(['later.txt', 'described', 'the milk']);
-        await expect(node).toHaveAttribute('data-handler', 'default');
+        await expect(text).toHaveText('later.txt described the milk');
         const after = JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8')).nodes;
         expect(after).toEqual([
           { id: before.id, addedAt: before.addedAt, title: 'later.txt', description: 'described', body: 'the milk', display: ['title', 'description', 'body'], filename: 'later.txt', path: source },
@@ -445,7 +494,7 @@ test.describe('electron shell: workspace', () => {
       const nodes = async () => JSON.parse(await readFile(join(workspace, 'workspace.json'), 'utf8')).nodes;
       try {
         await createNode(page, { file: true, copy: true });
-        const node = page.getByTestId('node');
+        const node = page.getByTestId('node-entry');
         const dialog = page.getByTestId('node-dialog');
 
         await node.dblclick();
@@ -489,7 +538,7 @@ test.describe('electron shell: workspace', () => {
       const { app, page } = await launchOpened(join(dir, 'userData'), workspace, [source]);
       try {
         await createNode(page, { file: true });
-        await page.getByTestId('node').dblclick();
+        await page.getByTestId('node-entry').dblclick();
         const dialog = page.getByTestId('node-dialog');
         await expect(dialog.getByTestId('node-path')).toHaveText(source);
         await expect(dialog.getByTestId('node-copy')).not.toBeChecked();
@@ -512,7 +561,6 @@ test.describe('electron shell: workspace', () => {
       const folder = join(dir, 'ws');
       await mkdir(folder);
       await writeFile(join(folder, 'hub.txt'), 'x');
-      const plain = (id: string, title: string) => ({ id, addedAt: '2026-01-01T00:00:00.000Z', title, description: null, body: null, display: ['title'] });
       const nodes = [{ ...plain('hub', 'hub.txt'), filename: 'hub.txt', path: 'hub.txt' }, plain('one', 'one'), plain('two', 'two'), plain('three', 'three')];
       const links = ['one', 'two', 'three'].map((id) => ({ id: `link-${id}`, source: id, target: 'hub', weight: 10 }));
       await writeFile(join(folder, 'workspace.json'), JSON.stringify({ appId: 'terrane', nodes, links }));
@@ -561,6 +609,165 @@ test.describe('electron shell: workspace', () => {
           expect(onMidpoint(from)).toBe(true);
           expect(onMidpoint(to)).toBe(true);
         }
+      } finally {
+        await app.close().catch(() => undefined);
+      }
+    });
+  });
+
+  test('the node list (10% of the width) has a search box above the unlinked nodes and, below a splitter, the linked ones; only linked nodes are on the canvas', async () => {
+    await withTemp(async (dir) => {
+      const folder = join(dir, 'ws');
+      await mkdir(folder);
+      await writeFile(join(folder, 'dot.png'), Buffer.from(PNG, 'base64'));
+      const long = `delta ${'x'.repeat(60)}`;
+      const nodes = [plain('a', 'alpha'), plain('b', 'beta'), plain('c', 'gamma'), plain('d', long), { ...plain('e', 'dot.png'), filename: 'dot.png', path: 'dot.png' }];
+      await writeFile(join(folder, 'workspace.json'), JSON.stringify({ appId: 'terrane', nodes, links: [{ id: 'ab', source: 'a', target: 'b', weight: 10 }] }));
+      const { app, page } = await launchOpened(join(dir, 'userData'), folder);
+      try {
+        const unlinked = page.getByTestId('unlinked-nodes').getByTestId('node-entry-text');
+        const linked = page.getByTestId('linked-nodes').getByTestId('node-entry-text');
+        await expect(unlinked).toHaveText(['gamma', long, 'dot.png']);
+        await expect(linked).toHaveText(['alpha', 'beta']);
+        await expect(page.getByTestId('node')).toHaveText(['alpha', 'beta']);
+
+        // The node list takes 10% of the width; the canvas the rest, less the splitter.
+        const width = await page.evaluate(() => window.innerWidth);
+        expect(Math.abs((await page.getByTestId('node-list').boundingBox())!.width - width * 0.1)).toBeLessThan(1);
+        const splitter = page.locator('[role=separator][aria-orientation=vertical]');
+        const splitterWidth = (await splitter.boundingBox())!.width;
+        expect(Math.abs((await page.getByTestId('workspace').boundingBox())!.width - (width * 0.9 - splitterWidth))).toBeLessThan(1);
+
+        // The unlinked part is sized to its entries: the splitter between the parts sits under the last one shown, or
+        // under the search box when none is.
+        const search = page.getByTestId('node-search');
+        const between = page.locator('[role=separator][aria-orientation=horizontal]');
+        const splitterUnder = async (above: ReturnType<Page['getByTestId']>, gap = 0) =>
+          expect
+            .poll(async () => {
+              const box = (await above.boundingBox())!;
+              return Math.abs((await between.boundingBox())!.y - (box.y + box.height + gap));
+            })
+            .toBeLessThan(1);
+        await splitterUnder(page.getByTestId('unlinked-nodes').getByTestId('node-entry').last());
+
+        // Each change to the search text filters both parts, ignoring case.
+        await search.fill('t');
+        await expect(unlinked).toHaveText([long, 'dot.png']);
+        await expect(linked).toHaveText(['beta']);
+        await splitterUnder(page.getByTestId('unlinked-nodes').getByTestId('node-entry').last());
+        await search.fill('TA');
+        await expect(unlinked).toHaveText([long]);
+        await expect(linked).toHaveText(['beta']);
+        await splitterUnder(page.getByTestId('unlinked-nodes').getByTestId('node-entry').last());
+        await search.fill('beta');
+        await expect(unlinked).toHaveCount(0);
+        await expect(linked).toHaveText(['beta']);
+        await splitterUnder(search, 4); // the search box's bottom margin
+        await search.fill('');
+        await expect(unlinked).toHaveText(['gamma', long, 'dot.png']);
+        await expect(linked).toHaveText(['alpha', 'beta']);
+        await splitterUnder(page.getByTestId('unlinked-nodes').getByTestId('node-entry').last());
+
+        // An entry is one line, cut off; its toggle expands it to show all of its text, wrapped.
+        const longEntry = page.locator('[data-testid=node-entry][data-node-id=d]');
+        const text = longEntry.getByTestId('node-entry-text');
+        const oneLine = (await text.boundingBox())!.height;
+        expect(await text.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+        await longEntry.getByTestId('node-entry-toggle').click();
+        await expect(longEntry).toHaveAttribute('data-expanded', 'true');
+        expect((await text.boundingBox())!.height).toBeGreaterThan(oneLine * 1.5);
+        expect(await text.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+        await longEntry.getByTestId('node-entry-toggle').click();
+        await expect(longEntry).toHaveAttribute('data-expanded', 'false');
+
+        // An image node's entry shows its image only while expanded.
+        const imageEntry = page.locator('[data-testid=node-entry][data-node-id=e]');
+        await expect(imageEntry.getByTestId('node-entry-image')).toHaveCount(0);
+        await imageEntry.getByTestId('node-entry-toggle').click();
+        await expect.poll(() => imageEntry.locator('img').evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth)).toBe(1);
+
+        // Both splitters can be dragged.
+        const drag = async (locator: typeof splitter, x: number, y: number) => {
+          const box = (await locator.boundingBox())!;
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+          await page.mouse.down();
+          await page.mouse.move(x, y, { steps: 5 });
+          await page.mouse.up();
+        };
+        const splitterBox = (await splitter.boundingBox())!;
+        await drag(splitter, 300, splitterBox.y + splitterBox.height / 2);
+        expect(Math.abs((await page.getByTestId('node-list').boundingBox())!.width - 300)).toBeLessThan(1);
+        const betweenBox = (await between.boundingBox())!;
+        await drag(between, betweenBox.x + betweenBox.width / 2, betweenBox.y - 50);
+        expect(Math.abs((await between.boundingBox())!.y - (betweenBox.y - 50))).toBeLessThan(1);
+      } finally {
+        await app.close().catch(() => undefined);
+      }
+    });
+  });
+
+  test('right-clicking a node shows the nodes it is not linked to in a popup, unlinked first; hovering one highlights it on the canvas, choosing one links to it, clicking off cancels', async () => {
+    await withTemp(async (dir) => {
+      const folder = join(dir, 'ws');
+      await mkdir(folder);
+      const long = `delta ${'x'.repeat(60)}`;
+      const nodes = [plain('a', 'alpha'), plain('b', 'beta'), plain('c', 'gamma'), plain('d', long)];
+      await writeFile(join(folder, 'workspace.json'), JSON.stringify({ appId: 'terrane', nodes, links: [{ id: 'ab', source: 'a', target: 'b', weight: 10 }] }));
+      const { app, page } = await launchOpened(join(dir, 'userData'), folder);
+      const links = async () => JSON.parse(await readFile(join(folder, 'workspace.json'), 'utf8')).links;
+      const menu = page.getByTestId('node-menu');
+      const items = page.getByTestId('node-menu-item');
+      const ids = () => items.evaluateAll((elements) => elements.map((element) => element.getAttribute('data-node-id')));
+      const onCanvas = (id: string) => page.getByTestId('workspace').locator(`[data-node-id=${id}]`);
+      const clickOff = async () => {
+        const [width, height] = await page.evaluate(() => [window.innerWidth, window.innerHeight]);
+        await page.mouse.click(width - 5, height - 5);
+        await expect(menu).toHaveCount(0);
+      };
+      try {
+        await expect(page.getByTestId('node')).toHaveText(['alpha', 'beta']);
+
+        // From the node list: every other node, unlinked first, each cut to its first 30 characters (spaces included).
+        await page.locator('[data-testid=node-entry][data-node-id=c]').click({ button: 'right' });
+        await expect(menu).toBeVisible();
+        expect(await ids()).toEqual(['d', 'a', 'b']);
+        await expect(items).toHaveText([long.slice(0, 30), 'alpha', 'beta']);
+
+        // Hovering a node highlights it on the canvas.
+        await items.nth(1).hover();
+        await expect(onCanvas('a')).toHaveAttribute('data-highlighted', 'true');
+        await expect(onCanvas('b')).toHaveAttribute('data-highlighted', 'false');
+        await items.nth(2).hover();
+        await expect(onCanvas('a')).toHaveAttribute('data-highlighted', 'false');
+        await expect(onCanvas('b')).toHaveAttribute('data-highlighted', 'true');
+
+        // Clicking off the popup cancels: no link, nothing highlighted.
+        await clickOff();
+        await expect(onCanvas('b')).toHaveAttribute('data-highlighted', 'false');
+        expect(await links()).toHaveLength(1);
+
+        // Choosing a node links the right-clicked node to it: the source moves to the linked part and onto the canvas.
+        await page.locator('[data-testid=node-entry][data-node-id=c]').click({ button: 'right' });
+        await page.locator('[data-testid=node-menu-item][data-node-id=a]').click();
+        await expect(menu).toHaveCount(0);
+        await closeWeightDialog(page);
+        await expect(page.getByTestId('unlinked-nodes').getByTestId('node-entry-text')).toHaveText([long]);
+        await expect(page.getByTestId('linked-nodes').getByTestId('node-entry-text')).toHaveText(['alpha', 'beta', 'gamma']);
+        await expect(page.getByTestId('node')).toHaveText(['alpha', 'beta', 'gamma']);
+        await expect.poll(links).toContainEqual(expect.objectContaining({ source: 'c', target: 'a' }));
+
+        // From the canvas: the same popup, without the right-clicked node or the nodes already linked to it, whichever
+        // way the link goes (two nodes have at most one link).
+        await onCanvas('b').click({ button: 'right' });
+        await expect(menu).toBeVisible();
+        expect(await ids()).toEqual(['d', 'c']);
+        await clickOff();
+        await onCanvas('a').click({ button: 'right' });
+        await expect(menu).toBeVisible();
+        expect(await ids()).toEqual(['d']);
+        await clickOff();
+        await expect(page.getByTestId('link-drag')).toHaveCount(0);
       } finally {
         await app.close().catch(() => undefined);
       }

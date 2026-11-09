@@ -218,12 +218,17 @@ export class Workspace {
     }
   }
 
-  /** Records a link from the node `source` to the node `target`, with the weight of a new link, in the `links` of `workspace.json`. */
+  /**
+   * Records a link from the node `source` to the node `target`, with the weight of a new link, in the `links` of
+   * `workspace.json`; if the two nodes are already linked (either way), nothing changes.
+   */
   async createLink(source: string, target: string): Promise<OpenResult> {
     try {
       const root = this.root;
       if (!root) throw new Error('No workspace is open');
       if (source === target || ![source, target].every((id) => this.nodes.some((node) => node.id === id))) throw new Error('Not a valid link');
+      // Only one link between two nodes, whichever way it points: a duplicate changes nothing, and is no error.
+      if (this.links.some((link) => (link.source === source && link.target === target) || (link.source === target && link.target === source))) return { status: 'opened', workspace: this.state() };
       const links = [...this.links, { id: randomUUID(), source, target, weight: NEW_LINK_WEIGHT }];
       await this.writeLinks(root, links);
       this.links = links;

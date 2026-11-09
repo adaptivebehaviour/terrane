@@ -4,6 +4,27 @@ import type { Handler } from './types';
 
 const MIME_TYPES: Record<string, string> = { jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', svg: 'image/svg+xml' };
 
+/** Whether an image node's display shows its image: only if the node's body is empty or not shown. */
+export const showsImage = (node: TerraneNode) => node.body === null || !node.display.includes('body');
+
+/** The image behind an image node, as a data URL, once it has been read (while `enabled`); undefined until then or if it cannot be read. */
+export function useNodeImage(node: FileNode, enabled: boolean): string | undefined {
+  const [src, setSrc] = useState<string>();
+  useEffect(() => {
+    if (!enabled) return;
+    let current = true;
+    const mime = MIME_TYPES[node.filename.slice(node.filename.lastIndexOf('.') + 1).toLowerCase()];
+    window.workspaceBridge.readNode(node.id).then(
+      (base64) => current && setSrc(`data:${mime};base64,${base64}`),
+      () => undefined, // the file cannot be read: the lines are still shown
+    );
+    return () => {
+      current = false;
+    };
+  }, [node.id, node.filename, node.path, enabled]);
+  return src;
+}
+
 /**
  * Takes jpeg, png and svg files. Its markup is deliberately its own copy rather than shared with the default
  * handler, so the image handler can change without touching the default one.
@@ -16,25 +37,13 @@ export const imageHandler: Handler = {
   id: 'image',
   extensions: ['jpeg', 'jpg', 'png', 'svg'],
   Component: ({ node }) => {
-    const showImage = node.body === null || !node.display.includes('body');
-    const [src, setSrc] = useState<string>();
-    useEffect(() => {
-      if (!showImage) return;
-      let current = true;
-      const mime = MIME_TYPES[node.filename.slice(node.filename.lastIndexOf('.') + 1).toLowerCase()];
-      window.workspaceBridge.readNode(node.id).then(
-        (base64) => current && setSrc(`data:${mime};base64,${base64}`),
-        () => undefined, // the file cannot be read: the lines are still shown
-      );
-      return () => {
-        current = false;
-      };
-    }, [node.id, node.filename, node.path, showImage]);
+    const showImage = showsImage(node);
+    const src = useNodeImage(node, showImage);
 
     const lines = displayLines(node);
     if (!showImage) {
       return (
-        <div data-testid="node" data-handler="image" className="flex h-[100px] w-[100px] flex-col items-center justify-center overflow-hidden break-words border border-slate-300 bg-white p-1 text-center text-sm">
+        <div data-testid="node" data-handler="image" className="flex h-[100px] w-[100px] flex-col items-center justify-center overflow-hidden break-words rounded border border-slate-300 bg-white p-1 text-center text-sm">
           {lines.map((line, index) => (
             <div key={index} data-testid="node-line" className="w-full whitespace-pre-line">
               {line}
@@ -44,7 +53,7 @@ export const imageHandler: Handler = {
       );
     }
     return (
-      <div data-testid="node" data-handler="image" className="flex h-[125px] w-[100px] flex-col overflow-hidden bg-white ring-1 ring-slate-300">
+      <div data-testid="node" data-handler="image" className="flex h-[125px] w-[100px] flex-col overflow-hidden rounded bg-white ring-1 ring-slate-300">
         <div data-testid="node-image" className="flex h-[80%] w-full items-center justify-center">
           {src && <img src={src} alt={node.filename} className="h-full w-full object-contain" />}
         </div>

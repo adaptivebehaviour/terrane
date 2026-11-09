@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent } from 'react';
 import { renderNode } from './handlers';
 import { runLayout, type Layout } from './layout';
 import { LinkDisplay } from './LinkDisplay';
@@ -31,7 +31,7 @@ interface Point {
   y: number;
 }
 
-/** A link being dragged: from the connection point at `from` to the pointer at `to`, in pixels from the content's top left. */
+/** A link being dragged: from the point pressed on the source's display (`from`) to the pointer (`to`), in pixels from the content's top left. */
 interface Drag {
   source: string;
   from: Point;
@@ -45,6 +45,10 @@ interface CanvasProps {
   onSetWeight: (link: string, weight: number) => void;
   /** The user double-clicked a node's display. */
   onOpenNode: (node: NodeRecord) => void;
+  /** The user right-clicked a node's display, at (`x`, `y`) in the window. */
+  onNodeMenu: (node: NodeRecord, x: number, y: number) => void;
+  /** The node whose display is highlighted, if any. */
+  highlighted?: string;
 }
 
 /**
@@ -54,19 +58,32 @@ interface CanvasProps {
  * centre.
  *
  * The layout runs whenever the network changes (and so each time a workspace is opened), starting from the positions
- * of the previous run. Hovering over a display shows its eight connection points (its edges' midpoints and its corners); dragging from one shows a line from
- * that point to the pointer, and releasing over another node's display creates a link from the first node (the
- * source) to the other (the target).
+ * of the previous run. While a layout is pending, a spinner shows in the centre of the canvas. Pressing on a display and dragging shows a line from the pressed point to the pointer, and
+ * releasing over another node's display creates a link from the first node (the source) to the other (the target);
+ * releasing over the source's own display, or over no display, creates nothing. Hovering over a display shows its eight
+ * connection points (its edges' midpoints and its corners), which for now do nothing: a press on one starts no
+ * drag.
  */
-export function Canvas({ nodes, links, onCreateLink, onSetWeight, onOpenNode }: CanvasProps) {
+export function Canvas({ nodes, links, onCreateLink, onSetWeight, onOpenNode, onNodeMenu, highlighted }: CanvasProps) {
   const elements = useRef(new Map<string, HTMLDivElement>());
   const [sizes, setSizes] = useState(new Map<string, Size>());
   const [layout, setLayout] = useState<Layout>();
+  /** The network (see `network` below) the current layout was run for. */
+  const [laidOut, setLaidOut] = useState<string>();
   const [selected, setSelected] = useState<string>();
   const [editing, setEditing] = useState<WorkspaceLink>();
   const [drag, setDrag] = useState<Drag>();
   const canvas = useRef<HTMLElement>(null);
   const content = useRef<HTMLDivElement>(null);
+
+  // A display that changes size on its own (one that grows to fit its content once its font is in) renders the canvas
+  // again, so it is measured again.
+  const [, setResized] = useState(0);
+  useLayoutEffect(() => {
+    const observer = new ResizeObserver(() => setResized((count) => count + 1));
+    for (const element of elements.current.values()) observer.observe(element);
+    return () => observer.disconnect();
+  }, [nodes]);
 
   // Measure each display (in pixels): the layout works with their sizes.
   useLayoutEffect(() => {
@@ -80,12 +97,25 @@ export function Canvas({ nodes, links, onCreateLink, onSetWeight, onOpenNode }: 
   });
 
   const network = JSON.stringify([nodes.map((node) => [node.id, sizes.get(node.id)]), links.map((link) => [link.id, link.source, link.target, link.weight])]);
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (nodes.some((node) => !sizes.has(node.id))) return;
-    const units = nodes.map((node) => ({ id: node.id, width: sizes.get(node.id)!.width / UNIT_PX, height: sizes.get(node.id)!.height / UNIT_PX }));
-    setLayout((previous) => runLayout(units, links, previous?.positions ?? new Map()));
+    // The layout blocks the renderer while it runs, so it waits until the spinner has been painted (the frame, then a
+    // task after it); the spinner's CSS animation keeps turning while the layout runs.
+    let timer: number | undefined;
+    const frame = requestAnimationFrame(() => {
+      timer = window.setTimeout(() => {
+        const units = nodes.map((node) => ({ id: node.id, width: sizes.get(node.id)!.width / UNIT_PX, height: sizes.get(node.id)!.height / UNIT_PX }));
+        setLayout((previous) => runLayout(units, links, previous?.positions ?? new Map()));
+        setLaidOut(network);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
     // `network` stands for nodes, links and sizes: the layout runs only when one of them changes.
   }, [network]);
+  const waiting = laidOut !== network;
 
   // Once the layout has settled, scroll to the centre of the network (when it is larger than the canvas; otherwise it
   // is already centred).
@@ -129,11 +159,13 @@ export function Canvas({ nodes, links, onCreateLink, onSetWeight, onOpenNode }: 
     return { x: clientX - box.left, y: clientY - box.top };
   };
   const startDrag = (event: PointerEvent<HTMLElement>, source: string) => {
+    // Only the primary button drags a link: a right-click opens the node popup instead.
+    if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
-    const point = event.currentTarget.getBoundingClientRect();
-    setDrag({ source, from: toContent(point.left + point.width / 2, point.top + point.height / 2), to: toContent(event.clientX, event.clientY) });
+    const at = toContent(event.clientX, event.clientY);
+    setDrag({ source, from: at, to: at });
   };
   const moveDrag = (event: PointerEvent<HTMLElement>) => {
     const to = toContent(event.clientX, event.clientY);
@@ -149,74 +181,89 @@ export function Canvas({ nodes, links, onCreateLink, onSetWeight, onOpenNode }: 
   };
 
   return (
-    <main
-      ref={canvas}
-      className="relative flex min-h-0 flex-1 overflow-auto"
-      data-testid="workspace"
-      // A click on the background (the canvas itself or its content area, not a display or the dialog) deselects.
-      onClick={(event) => {
-        if (event.target === canvas.current || event.target === content.current) setSelected(undefined);
-      }}
-    >
-      {/* m-auto centres the content when it is smaller than the canvas, without cutting off its top or left when it is larger. */}
-      <div ref={content} className="relative m-auto shrink-0" style={{ width, height }}>
-        <svg className="pointer-events-none absolute left-0 top-0" width={width} height={height}>
-          <g transform={`translate(${MARGIN - origin.x * UNIT_PX} ${MARGIN - origin.y * UNIT_PX}) scale(${UNIT_PX})`}>
-            {links.map((link) => {
-              const path = paths.get(link.id);
-              return path ? <LinkDisplay key={link.id} id={link.id} d={path.d} selected={selected === link.id} onSelect={() => setSelected(link.id)} onEdit={() => setEditing(link)} /> : null;
-            })}
-          </g>
-        </svg>
-        {nodes.map((node) => {
-          const rect = rects.get(node.id);
-          return (
-            <div
-              key={node.id}
-              ref={(element) => {
-                if (element) elements.current.set(node.id, element);
-                else elements.current.delete(node.id);
-              }}
-              data-node-id={node.id}
-              className="group absolute"
-              onDoubleClick={(event) => {
-                if (!(event.target as Element).closest('[data-testid=connection-point]')) onOpenNode(node);
-              }}
-              style={rect ? toPx(rect.x, rect.y) : { left: 0, top: 0, visibility: 'hidden' }}
-            >
-              {renderNode(node)}
-              {CONNECTION_POINTS.map(({ anchor, style }) => (
-                <span
-                  key={anchor}
-                  data-testid="connection-point"
-                  data-anchor={anchor}
-                  className="invisible absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 cursor-crosshair touch-none rounded-full border border-slate-700 bg-white group-hover:visible"
-                  style={style}
-                  onPointerDown={(event) => startDrag(event, node.id)}
-                  onPointerMove={moveDrag}
-                  onPointerUp={endDrag}
-                  onPointerCancel={() => setDrag(undefined)}
-                />
-              ))}
-            </div>
-          );
-        })}
-        {/* Above the displays, so the end of the line stays visible over the target. */}
-        {drag && (
-          <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" width={width} height={height}>
-            <line data-testid="link-drag" x1={drag.from.x} y1={drag.from.y} x2={drag.to.x} y2={drag.to.y} stroke="black" strokeWidth={LINE_WIDTH} />
+    <div className="relative flex min-h-0 flex-1">
+      <main
+        ref={canvas}
+        className="relative flex min-h-0 flex-1 overflow-auto"
+        data-testid="workspace"
+        // A click on the background (the canvas itself or its content area, not a display or the dialog) deselects.
+        onClick={(event) => {
+          if (event.target === canvas.current || event.target === content.current) setSelected(undefined);
+        }}
+      >
+        {/* m-auto centres the content when it is smaller than the canvas, without cutting off its top or left when it is larger. */}
+        <div ref={content} className="relative m-auto shrink-0" style={{ width, height }}>
+          <svg className="pointer-events-none absolute left-0 top-0" width={width} height={height}>
+            <g transform={`translate(${MARGIN - origin.x * UNIT_PX} ${MARGIN - origin.y * UNIT_PX}) scale(${UNIT_PX})`}>
+              {links.map((link) => {
+                const path = paths.get(link.id);
+                return path ? <LinkDisplay key={link.id} id={link.id} d={path.d} selected={selected === link.id} onSelect={() => setSelected(link.id)} onEdit={() => setEditing(link)} /> : null;
+              })}
+            </g>
           </svg>
+          {nodes.map((node) => {
+            const rect = rects.get(node.id);
+            return (
+              <div
+                key={node.id}
+                ref={(element) => {
+                  if (element) elements.current.set(node.id, element);
+                  else elements.current.delete(node.id);
+                }}
+                data-node-id={node.id}
+                data-highlighted={highlighted === node.id}
+                className={`group absolute rounded ${highlighted === node.id ? 'outline-2 outline-offset-2 outline-blue-600' : ''}`}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  onNodeMenu(node, event.clientX, event.clientY);
+                }}
+                onDoubleClick={(event) => {
+                  if (!(event.target as Element).closest('[data-testid=connection-point]')) onOpenNode(node);
+                }}
+                style={rect ? toPx(rect.x, rect.y) : { left: 0, top: 0, visibility: 'hidden' }}
+                onPointerDown={(event) => startDrag(event, node.id)}
+                onPointerMove={moveDrag}
+                onPointerUp={endDrag}
+                onPointerCancel={() => setDrag(undefined)}
+              >
+                {renderNode(node)}
+                {CONNECTION_POINTS.map(({ anchor, style }) => (
+                  <span
+                    key={anchor}
+                    data-testid="connection-point"
+                    data-anchor={anchor}
+                    className="invisible absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 cursor-crosshair touch-none rounded-full border border-slate-700 bg-white group-hover:visible"
+                    style={style}
+                    // The connection points do nothing for now: a press on one does not reach the display's own handlers.
+                    onPointerDown={(event) => event.stopPropagation()}
+                  />
+                ))}
+              </div>
+            );
+          })}
+          {/* Above the displays, so the end of the line stays visible over the target. */}
+          {drag && (
+            <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" width={width} height={height}>
+              <line data-testid="link-drag" x1={drag.from.x} y1={drag.from.y} x2={drag.to.x} y2={drag.to.y} stroke="black" strokeWidth={LINE_WIDTH} />
+            </svg>
+          )}
+        </div>
+        {editing && (
+          <WeightDialog
+            weight={editing.weight}
+            onClose={(weight) => {
+              setEditing(undefined);
+              if (weight !== editing.weight) onSetWeight(editing.id, weight);
+            }}
+          />
         )}
-      </div>
-      {editing && (
-        <WeightDialog
-          weight={editing.weight}
-          onClose={(weight) => {
-            setEditing(undefined);
-            if (weight !== editing.weight) onSetWeight(editing.id, weight);
-          }}
-        />
+      </main>
+      {/* Over the canvas rather than in it, so it stays in the centre of what the canvas shows when it scrolls. */}
+      {waiting && (
+        <div data-testid="layout-wait" className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-slate-300 border-t-slate-700" />
+        </div>
       )}
-    </main>
+    </div>
   );
 }

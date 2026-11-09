@@ -22,8 +22,8 @@ import { alignmentCost, countCrossings, DIAGONAL_PENALTY, routeLinks, segmentsCr
  *
  * Last, the layout biases the positions towards an ideal (see align): nodes joined by a link line up with each other, centred on
  * a horizontal or vertical axis, or failing that a diagonal one. The bias gives way to everything above: it only moves a
- * display where the goals are still met and no more links cross. (Paths support it: a link between displays that sit on
- * an axis joins the facing anchors, see idealAnchors in paths.ts.)
+ * display where the goals are still met and no more links cross. (Paths support it: a link between displays centred on
+ * a horizontal or vertical axis is a straight line between the middles of their facing edges, see shortestLines in paths.ts.)
  *
  * Positions are not saved (D3): each run starts from the positions it is given (those of the previous run) and places
  * displays without one.
